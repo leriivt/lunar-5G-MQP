@@ -44,7 +44,7 @@ Two other folders are chosen while the app is running:
 | Folder | Required? | Purpose |
 |---|---|---|
 | OAI template folder, normally `targets/PROJECTS/GENERIC-NR-5GC/CONF/` | Optional | Source of `gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf` and `ue.bictr.conf`, which the app updates |
-| Output folder | Required at export | Where the two config files are written. Created if missing |
+| Output folder | Required at export | The parent folder for exports. Each export creates a new date/time-stamped subfolder inside it |
 
 ---
 
@@ -111,7 +111,16 @@ python lunar_site_planner.py
 
 ## 5. Outputs
 
-Two files are written to the output folder:
+Each export creates a new subfolder inside the output folder you choose, named after the site and the date and time, for example:
+
+```
+my_exports/
+└── 01_Faustini_Rim_A_2026-10-23_14-30-05/
+    ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
+    └── ue.bictr.conf
+```
+
+The format is `<id>_<site_name>_<YYYY-MM-DD>_<HH-MM-SS>` using the computer's local time. Nothing is overwritten: if two exports happen in the same second, the second folder gets a `_2` suffix. Every export contains two files:
 
 - `gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf`
 - `ue.bictr.conf`
@@ -179,5 +188,5 @@ The `bictr_dem_file` path is absolute for the machine where you ran the tool. If
 - Terrain elevation at each marker is not shown.
 - No flat-terrain (A/B) config export.
 - No reflector placement control.
-- No export naming; files always use the standard OAI names, so use a separate output folder per layout.
+- No custom export names; folders are named automatically by site and time.
 - The window has been written but not yet tested on screen; please report any display problems.

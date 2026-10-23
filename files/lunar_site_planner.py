@@ -16,6 +16,7 @@ import os
 import re
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
@@ -242,6 +243,25 @@ def build_config(template_text, entries):
     return text
 
 
+def run_folder_name(site_name, now=None):
+    """Folder name like '01_Faustini_Rim_A_2026-10-23_14-30-05' (no characters that are
+    illegal on Windows)."""
+    now = now or datetime.now()
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", site_name).strip("_")
+    return f"{slug}_{now.strftime('%Y-%m-%d_%H-%M-%S')}"
+
+
+def make_run_folder(parent, site_name):
+    """Create a new, uniquely named, date/time-stamped folder inside `parent`."""
+    base = os.path.join(parent, run_folder_name(site_name))
+    path, n = base, 1
+    while os.path.exists(path):          # two exports in the same second
+        n += 1
+        path = f"{base}_{n}"
+    os.makedirs(path)
+    return path
+
+
 def export_configs(out_dir, template_dir, gnb, ue, gnb_h, ue_h, dem_path):
     """Write the gNB and UE conf files. Both contain both entries, TX/RX swapped."""
     entries = {
@@ -422,12 +442,13 @@ class PlannerApp(tk.Tk):
                     f"{self.site.bdem_path} was not found.\nThe simulator would fall back to flat "
                     "terrain. Export anyway?"):
                 return
-        out_dir = filedialog.askdirectory(title="Choose output folder")
+        out_dir = filedialog.askdirectory(title="Choose output folder (a dated subfolder is created)")
         if not out_dir:
             return
-        files = export_configs(out_dir, self.template_dir, g, u,
+        run_dir = make_run_folder(out_dir, self.site.name)
+        files = export_configs(run_dir, self.template_dir, g, u,
                                heights["gNB"], heights["UE"], self.site.bdem_path)
-        self.status.set("Exported:\n" + "\n".join(files))
+        self.status.set(f"Exported to:\n{run_dir}")
 
 
 def main():
