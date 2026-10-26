@@ -55,21 +55,21 @@ BLOCK_UE_SIDE = "rfsimu_channel_ue0"     # TX = UE,  RX = gNB (swapped)
 
 # ---- LOOK AND FEEL: change colours and font size here (all UI colours live in this block) ----
 THEME = {
-    "font_size": 11,
+    "font_size": 8,
     # side panel (light background, near-black text)
     "panel_bg": "#f4f4f4", "text": "#111111", "muted": "#263238", "disabled": "#757575",
-    "border": "#90a4ae", "entry_bg": "#ffffff",
+    "border": "#7fbddc", "entry_bg": "#ffffff",
     "button_bg": "#dfe6ec", "button_active": "#bfd2e3",
     # map area
-    "canvas_bg": "#101418",
-    "label_bg": "#111111",           # dark plate drawn behind every map label
+    "canvas_bg": "#000000",
+    "label_bg": "#351C41",           # dark plate drawn behind every map label
     "label_fg": "#ffffff",           # label text
-    "label_focus_fg": "#ffeb3b",     # name of the region you are in / last opened
+    "label_focus_fg": "#cf8f06",     # name of the region you are in / last opened
     "missing_fg": "#cfd8dc",         # sites with no terrain tile
-    "marker": "#ffb300", "marker_outline": "#ffffff",   # region markers on the atlas
+    "marker": "#ffb300", "marker_outline": "#1e0348",   # region markers on the atlas
     "footprint": "#00e5ff",          # box showing the open region's extent on the atlas
     "gnb": "#c62828", "ue": "#1565c0",                  # gNB / UE markers and panel headings
-    "cand_ridge": "#ff9800", "cand_landing": "#00e676",  # candidate mast overlay
+    "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
 }
 
 
@@ -515,7 +515,7 @@ class PlannerApp(tk.Tk):
             dy = max(4 - y1, 0) or min(clamp[1] - 4 - y2, 0)
             canvas.move(item, dx, dy)
             x1, y1, x2, y2 = canvas.bbox(item)
-        plate = canvas.create_rectangle(x1 - 3, y1 - 1, x2 + 3, y2 + 1, fill=THEME["label_bg"], outline="")
+        plate = canvas.create_rectangle(x1 - 3, y1 - 2, x2 + 3, y2 + 2, fill=THEME["label_bg"], outline="")
         canvas.tag_lower(plate, item)
 
     def redraw(self):
@@ -600,7 +600,7 @@ class PlannerApp(tk.Tk):
                 fx, fy = self.raster.xy_to_frac(x, y)
                 if 0 <= fx <= 1 and 0 <= fy <= 1:
                     cx, cy = self._canvas_xy(fx, fy)
-                    c.create_oval(cx - 2, cy - 2, cx + 2, cy + 2, fill=colors.get(cls, "#ffffff"), outline="")
+                    c.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, fill=colors.get(cls, "#ffffff"), outline="#000000")
         size = (c.winfo_width(), c.winfo_height())
         for who, pt in self.points.items():
             if pt:
