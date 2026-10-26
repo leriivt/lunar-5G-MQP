@@ -45,6 +45,7 @@ BODY_RADIUS_M = 1_737_400.0              # Moon sphere used by the atlas and bic
 GNB_HEIGHT_M = 4.0                       # atlas radio_params.json: mast_height_m
 UE_HEIGHT_M = 1.5                        # atlas radio_params.json: rx_height_m
 DISPLAY_MAX_PX = 1800                    # maps are shown at most this many pixels wide/high
+SHOW_SITES_WITHOUT_TILE = False           # True: also draw sites with no region tile as grey, unclickable markers
 REGION_ALIASES = {"Leibnitz_Beta_Plateau": "Mons_Mouton"}   # same massif (see Bictr notes)
 
 GNB_CONF = "gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf"
@@ -757,7 +758,7 @@ def main():
     except (OSError, KeyError, ValueError) as err:
         messagebox.showerror("Site list", f"Could not read {SITES_CSV}:\n{err}")
         return
-    PlannerApp(regions, missing, load_candidates()).mainloop()
+    PlannerApp(regions, missing if SHOW_SITES_WITHOUT_TILE else [], load_candidates()).mainloop()
 
 
 if __name__ == "__main__":

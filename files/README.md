@@ -66,7 +66,7 @@ Only these two archives are needed (about 174 MB). The mosaics, 20 m regions, `s
 Columns used: `id`, `name`, `lat_deg`, `lon_deg` (centre of each NASA candidate region; other columns are ignored). A site's region file is found from its name: parentheses are dropped and spaces become underscores, so `de Gerlache Rim 2 (2024)` opens `regions/de_Gerlache_Rim_2__dem.tif`.
 
 - `Leibnitz Beta Plateau` is treated as `Mons_Mouton` (same massif); see `REGION_ALIASES` in the script.
-- Sites with no region tile in the atlas (02 Peak Near Shackleton, 04 Connecting Ridge Extension, 05 de Gerlache Rim 1, 07 de Gerlache-Kocher Massif) are drawn grey on the atlas and cannot be opened.
+- Sites with no region tile in the atlas (02 Peak Near Shackleton, 04 Connecting Ridge Extension, 05 de Gerlache Rim 1, 07 de Gerlache-Kocher Massif) are hidden by default. To show them as grey, unclickable markers, set `SHOW_SITES_WITHOUT_TILE = True` near the top of `lunar_site_planner.py`. You can also delete their rows from `sites.csv`.
 - Sites that share a region (for example Haworth 2022 and 2024) show as one marker.
 
 ### The .bdem files
