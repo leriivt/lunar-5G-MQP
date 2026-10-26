@@ -1,10 +1,9 @@
-# Lunar Site Planner
+# Lunar Site Planner (v2)
 
-A tkinter tool for placing a gNB and a UE on a lunar terrain image and exporting OAI configuration files for the BICTR channel model (`bictr_channel.c`).
+Opens on a shaded-relief atlas of the lunar south pole. Click a region marker to open that region's terrain map, click to place the gNB and UE, then export OAI configuration files for the BICTR channel model (`bictr_channel.c`).
 
-**What it does:** pick a site, click the image to place the gNB and UE, set antenna heights, and export `gnb...bictr.conf` and `ue.bictr.conf` with the correct longitude, latitude, height, body radius and DEM path filled in.
-
-**What it does not do:** run the simulation, read or edit `.bdem` files, or write logs.
+**Does:** atlas view with a minimap that highlights the open region, region view, click-to-coordinates, gNB and UE placement by click or typed coordinates, per-region default gNB locations, antenna heights, dated config export, and a single block of colour settings.
+**Does not:** run the simulation, edit terrain data, or convert `.tif` to `.bdem`.
 
 ---
 
@@ -12,15 +11,11 @@ A tkinter tool for placing a gNB and a UE on a lunar terrain image and exporting
 
 | Requirement | Notes |
 |---|---|
-| Python 3.7 or newer | |
-| tkinter | Included with Python on Windows and macOS. On Debian/Ubuntu: `sudo apt install python3-tk` |
-| Pillow | `pip install pillow`. On Debian/Ubuntu, if you get an `ImageTk` error: `sudo apt install python3-pil.imagetk` |
+| Python 3.8 or newer | |
+| tkinter | Included on Windows and macOS. Debian/Ubuntu: `sudo apt install python3-tk` |
+| Pillow and numpy | `pip install pillow numpy` (no GDAL or rasterio needed) |
 
-Check your setup:
-
-```
-python -c "import tkinter, PIL; print('OK')"
-```
+Check: `python -c "import tkinter, PIL, numpy; print('OK')"`
 
 ---
 
@@ -28,66 +23,61 @@ python -c "import tkinter, PIL; print('OK')"
 
 ```
 lunar_site_planner/
-├── lunar_site_planner.py     the application
-├── README.md                 this file
-└── sites/                    required: the app reads its data from here
-    ├── sites.csv             required: the site list (site centres)
-    ├── site01.png            one terrain image per site
-    ├── site01.bdem           one elevation raster per site
-    └── ...
+├── lunar_site_planner.py
+├── README.md
+├── sites.csv                                  site list (provided)
+├── gnb_defaults.csv                           saved default gNB per region (created/updated by the app)
+│
+├── atlas_v2/bundle/context/                   from lunarrf_atlas_context_v2.0.tar
+│   ├── pole_dem_160m.tif                      the opening atlas
+│   └── regions/
+│       ├── Haworth__dem.tif                   one per region (12 in this release)
+│       └── ...
+│
+├── data/atlas_base/
+│   └── candidates_freeze.csv                  optional: candidate masts overlay
+│
+├── terrain/                                   YOUR .bdem files (not in the Zenodo record)
+│   └── lunar_south_pole.bdem  (or per-region files)
+│
+└── exports/                                   created automatically
+    └── Haworth_2026-10-26_14-30-05/
+        ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
+        └── ue.bictr.conf
 ```
-
-The app finds the `sites/` folder relative to the script, so you can launch it from any directory.
-
-Two other folders are chosen while the app is running:
-
-| Folder | Required? | Purpose |
-|---|---|---|
-| OAI template folder, normally `targets/PROJECTS/GENERIC-NR-5GC/CONF/` | Optional | Source of `gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf` and `ue.bictr.conf`, which the app updates |
-| Output folder | Required at export | The parent folder for exports. Each export creates a new date/time-stamped subfolder inside it |
 
 ---
 
 ## 3. Setup
 
-1. Install the requirements above.
-2. Put the PNG and `.bdem` file for each site in `sites/`. (The `.bdem` terrain data is not in git; copy it from your local `bictr_terrain/` folder. A `.bdem` outside `sites/` also works if you give a relative path such as `../bictr_terrain/lunar_south_pole.bdem` in the `bdem` column of `sites.csv`.)
-3. Put your site table in `sites/sites.csv` (see below).
+Run these inside the `lunar_site_planner/` folder so the archives' own paths land in the right place:
+
+```
+tar xf lunarrf_atlas_context_v2.0.tar
+tar xf lunarrf_candidates_v2.0.tar data/atlas_base/candidates_freeze.csv
+```
+
+Then put your `.bdem` file(s) in `terrain/`.
+
+Only these two archives are needed (about 174 MB). The mosaics, 20 m regions, `sideruns` and `validation` archives are not used.
 
 ### sites.csv
 
-One row per site, with a header row. The provided file holds the 22 Artemis III candidate regions (NASA 2022 and 2024 lists):
+Columns used: `id`, `name`, `lat_deg`, `lon_deg` (centre of each NASA candidate region; other columns are ignored). A site's region file is found from its name: parentheses are dropped and spaces become underscores, so `de Gerlache Rim 2 (2024)` opens `regions/de_Gerlache_Rim_2__dem.tif`.
 
-```
-id,name,list,lat_deg,lon_deg,coord_source
-01,Faustini Rim A,NASA 2022 (13 regions),-87.86,90.00,LPSC 2024 #1775 Table 1 (region centre)
-```
+- `Leibnitz Beta Plateau` is treated as `Mons_Mouton` (same massif); see `REGION_ALIASES` in the script.
+- Sites with no region tile in the atlas (02 Peak Near Shackleton, 04 Connecting Ridge Extension, 05 de Gerlache Rim 1, 07 de Gerlache-Kocher Massif) are drawn grey on the atlas and cannot be opened.
+- Sites that share a region (for example Haworth 2022 and 2024) show as one marker.
 
-| Column | Required? | Meaning |
-|---|---|---|
-| `lat_deg`, `lon_deg` | Yes (unless edge columns are given) | Site centre in degrees, east-positive longitude |
-| `id` | One of `id` / `name` | Site number; shown in the dropdown and used to find the files |
-| `name` | One of `id` / `name` | Site name; shown in the dropdown |
-| `lon_min`, `lon_max`, `lat_min`, `lat_max` | No | Explicit tile edges. If all four are present they are used instead of the computed box |
-| `png` | No | PNG file name, relative to `sites/`. If absent, the file is found by id (see below) |
-| `bdem` | No | `.bdem` file name or relative path, relative to `sites/`. If absent, found by id |
-| `list`, `coord_source` | No | Ignored by the app |
+### The .bdem files
 
-**How the tile edges are computed from the centre.** Each tile is a longitude/latitude box spanning ±10 km around the centre:
-- Latitude half-width = 10 km as an arc on the 1,737.4 km Moon sphere, which is about 0.330°.
-- Longitude half-width = the same 10 km measured at the centre's latitude, `10 km / (R · cos(lat))`. Near the pole this is wide: Connecting Ridge (03) spans 70.0° of longitude, matching your notes.
+The Zenodo record contains no `.bdem` files. The app looks in `terrain/` for:
 
-The ±10 km half-width is `TILE_HALF_WIDTH_M` at the top of `lunar_site_planner.py`. The app rejects any row whose tile would cross the ±180° seam or the pole, because `bictr_channel.c` has no wrap-around handling (none of the 22 do).
+1. a `.bdem` whose file name contains the region name (for example `Haworth_20m.bdem`), otherwise
+2. `lunar_south_pole.bdem`, otherwise
+3. it warns that no `.bdem` was found.
 
-**How files are found.** If the CSV has no `png` or `bdem` column, the app looks in `sites/` for a file matching the site id, case-insensitively. For id `01` these all work: `01.png`, `1.png`, `site01.png`, `site_01_faustini.png`, and likewise for `.bdem`. If none is found, it expects `01.png` / `01.bdem` and reports the missing file. If your files are named differently, add `png` and `bdem` columns.
-
-**Header names are matched loosely.** Case, spaces and dashes are ignored, and alternatives such as `lat`/`lon`, `latitude`/`longitude`, `west`/`east`/`south`/`north` and `dem_file` are accepted. The full list is `CSV_ALIASES` in `lunar_site_planner.py`.
-
-Numbers may use a true minus sign (`−`) or a degree sign (`°`). Longitudes must be east-positive.
-
-If there is no `sites.csv`, the app falls back to a `sites/sites.json` file with a `"sites"` list of `name`, `png`, `bdem` and the four edge fields.
-
-**Important image requirement:** each PNG must be a north-up longitude/latitude box that covers exactly the tile edges (the explicit ones, or the ±10 km box computed above). The app converts a click to coordinates by linear interpolation between those bounds. If the image uses a different projection or the bounds are wrong, the exported coordinates will be wrong with no warning.
+The exported `bictr_dem_file` is the absolute path of the file found. If the file does not cover the area you clicked, the simulator would silently read 0 m elevation, so check that your `.bdem` covers the region.
 
 ---
 
@@ -97,96 +87,105 @@ If there is no `sites.csv`, the app falls back to a `sites/sites.json` file with
 python lunar_site_planner.py
 ```
 
-### Using the window
+1. **Atlas:** the pole map opens with amber markers for regions that have terrain tiles. Click one (or choose it in the dropdown) to open it. A small atlas **minimap** at the top of the side panel always shows where you are: the open region's footprint is boxed (cyan) and labelled with its name. The same box and bold name are drawn on the full atlas when you go back. Regions with a saved default gNB are tagged `[gNB]`.
+2. **Place the gNB and the UE.** Each has its own group in the side panel, and each can be set either way:
+   - **Click or drag on the map.** Choose the node with *Place by clicking the map*, then click. The lon/lat boxes fill in as you click or drag.
+   - **Type coordinates.** Enter longitude and latitude in that node's boxes and press **Place** or Enter. The marker appears on the map and that node becomes the active one for map clicks. Clicking into a node's lon/lat box also makes it the active node.
 
-1. **Site:** choose a site from the dropdown. Its image appears. If the `.bdem` file is not found, the status line shows a warning.
-2. **Place:** select **gNB** or **UE**, then click on the image. The marker moves if you click again or drag. Clicks outside the image are rejected, so both points always stay inside the terrain tile.
-3. **Heights:** enter the gNB and UE antenna heights in metres (default 2.0).
-4. **Readout:** the side panel shows the longitude and latitude of each marker and the separation between them in metres.
-5. **Template folder (optional):** click *Set OAI CONF template folder* and choose the folder containing the two template `.conf` files.
-6. **Export:** click *Export gNB + UE configs...* and choose an output folder.
-7. **Clear markers** removes both markers.
+   Clicks or typed positions outside the region's map are rejected.
+3. **Heights:** each node has a height box: gNB 4.0 m and UE 1.5 m by default (the atlas `mast_height_m` and `rx_height_m`).
+4. **Default gNB (optional):** see section 5.
+5. **Separation** between the two nodes is shown under the groups.
+6. **Candidate masts (optional):** tick *Show atlas candidate masts* to overlay the atlas's candidate transmitter positions (orange = ridge, green = landing site) as a guide for placement.
+7. **Export:** optionally set the OAI `CONF` template folder, then click *Export* and choose a parent folder. A new subfolder named `<Region>_<YYYY-MM-DD>_<HH-MM-SS>` is created.
+8. **Back to atlas** returns to the pole view.
 
 ---
 
-## 5. Outputs
+## 5. Default gNB locations
 
-Each export creates a new subfolder inside the output folder you choose, named after the site and the date and time, for example:
+Each region can have its own default gNB, which is placed automatically whenever you open that region (its height too, if saved). Set it in either way:
+
+Place the gNB (by clicking, or by typing its longitude and latitude and pressing **Place**), set its height if you want it saved too, then press **Save gNB as default**. The values in the gNB boxes are what get saved.
+
+**Clear default** removes the saved one for the open region. **Clear markers** removes the markers for this visit only; re-select the region in the dropdown to bring the default back.
+
+Defaults are stored in `gnb_defaults.csv` and can also be edited by hand:
 
 ```
-my_exports/
-└── 01_Faustini_Rim_A_2026-10-23_14-30-05/
-    ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
-    └── ue.bictr.conf
+region,lon,lat,height_m
+Haworth,-23.700000,-86.740000,4.5
 ```
 
-The format is `<id>_<site_name>_<YYYY-MM-DD>_<HH-MM-SS>` using the computer's local time. Nothing is overwritten: if two exports happen in the same second, the second folder gets a `_2` suffix. Every export contains two files:
+`region` is the region file name without `__dem.tif` (for example `Haworth`, `Peak_near_Cabeus_B`). Defaults belong to the region, so sites that share a tile (for example Haworth 2022 and 2024) share one default. `height_m` may be left empty. A default that lies outside its tile is ignored with a note in the status line.
 
-- `gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf`
-- `ue.bictr.conf`
+---
 
-Each file contains both model entries, with TX and RX swapped between them:
+## 6. Changing the look of the interface
+
+All colours and the font size are in one block, `THEME`, near the top of `lunar_site_planner.py` (section 1, just above the paths). Edit a value, save, and restart the app.
+
+| Key | What it controls |
+|---|---|
+| `font_size` | Text size everywhere in the side panel and on map labels |
+| `panel_bg`, `text`, `muted`, `border` | Side panel background, normal text, status text, outlines |
+| `entry_bg`, `button_bg`, `button_active` | Input boxes and buttons (normal and under the cursor) |
+| `canvas_bg` | Background around the maps |
+| `label_bg`, `label_fg` | Dark plate behind every map label, and the label text |
+| `label_focus_fg` | Name of the region you are in or last opened |
+| `missing_fg` | Sites with no terrain tile |
+| `marker`, `marker_outline` | Region markers on the atlas |
+| `footprint` | Box showing the open region's extent on the atlas and minimap |
+| `gnb`, `ue` | gNB and UE markers and their panel headings |
+| `cand_ridge`, `cand_landing` | Candidate mast dots |
+
+Colours are hex codes such as `"#ffffff"`. Map labels sit on dark plates so they stay readable over any shading. The default panel text colours have a contrast ratio of at least 4.5:1 against their backgrounds. The layout (which widgets appear where) is in `_build_widgets` in section 6 of the script.
+
+---
+
+## 7. Outputs
+
+Each export folder holds `gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf` and `ue.bictr.conf`. Both contain both model entries with TX and RX swapped:
 
 | Entry | TX | RX |
 |---|---|---|
 | `rfsimu_channel_enB0` | gNB | UE |
 | `rfsimu_channel_ue0` | UE | gNB |
 
-Each entry contains:
+Each entry has `bictr_tx_lon/lat/height`, `bictr_rx_lon/lat/height`, `bictr_body_radius` (1737400) and `bictr_dem_file`.
 
-| Parameter | Value |
-|---|---|
-| `bictr_tx_lon`, `bictr_tx_lat`, `bictr_tx_height` | Transmitter position (degrees, degrees, metres) |
-| `bictr_rx_lon`, `bictr_rx_lat`, `bictr_rx_height` | Receiver position |
-| `bictr_body_radius` | 1737400 (metres, the Moon) |
-| `bictr_dem_file` | Absolute path to the site's `.bdem` |
-
-**With a template folder:** the values above are written into the template, and the rest of the file is unchanged. If a template lacks one of the blocks or keys, a complete block is appended to the end of the file instead, so check the result for duplicate blocks.
-
-**Without a template folder:** each file contains only the two model entries, for you to paste into your OAI config.
-
-The `bictr_dem_file` path is absolute for the machine where you ran the tool. If the simulation runs elsewhere, edit that line.
+- **With a template folder:** the values are written into the template; the rest of the file is unchanged. If a block or key doesn't match, a full block is appended instead, so check for duplicates.
+- **Without a template folder:** the files contain only the two model entries, to paste into your OAI config.
 
 ---
 
-## 6. Using the exported files
+## 8. How coordinates are computed
 
-1. Copy the two files into `targets/PROJECTS/GENERIC-NR-5GC/CONF/` of your OAI tree (if you did not export there directly).
-2. Check that `bictr_dem_file` points to a readable `.bdem` on the simulation machine. An empty or unreadable path makes the simulator fall back to flat terrain with only a warning.
-3. Run OAI as usual. In the simulator log, check the `dist=` and `h=` values against what you expect.
+The atlas maps use a south polar stereographic projection on the 1,737.4 km Moon sphere (origin at the pole, central meridian 0). The app reads each GeoTIFF's own georeference, converts the click to projected metres, then inverts the projection to longitude (east-positive) and latitude. This was checked against all 11,827 rows of `candidates_freeze.csv` and matched to machine precision.
 
----
-
-## 7. Notes on the physics
-
-- 0.001° of latitude is about 30 m on the Moon. Longitude spacing shrinks with cos(latitude).
-- Both points must be inside the DEM bounds. Out-of-bounds lookups silently return 0 m elevation, which is why the app restricts clicks to the image.
-- The DEM resolution limits how finely terrain shadowing is resolved, so very small moves mostly change interpolated heights.
-- The model places reflectors automatically around the receiver. The tool does not set them.
-- The displayed separation is a great-circle distance on the 1,737.4 km reference sphere. It does not include height differences.
+Region tiles are assumed to use the same projection as the pole map. If a region file has no GeoTIFF tags, the app reports an error rather than guessing.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| `ModuleNotFoundError: No module named 'tkinter'` | Install tkinter (see Requirements) |
-| `ModuleNotFoundError: No module named 'PIL'` | `pip install pillow` |
-| Dialog "Could not read the site list" | `sites/sites.csv` is missing, a row has a non-numeric latitude/longitude, or the centre columns (`lat_deg`, `lon_deg`) could not be found. The message lists the headers that were found |
-| Dialog says a tile crosses the seam or the pole | A centre is too close to ±180° longitude or to the pole for a ±10 km box. Give explicit edge columns for that row, or use a smaller `TILE_HALF_WIDTH_M` |
-| "Cannot open ...png" | No file in `sites/` matches the site id (and there is no `png` column value) or it does not match a file in `sites/` or the file is not a valid image |
-| Status shows "WARNING: .bdem file not found" | No `.bdem` in `sites/` matches the site id (and there is no `bdem` column value), or the terrain data has not been copied. Export still works after confirming, but the simulator will use flat terrain |
-| Export asks to place both points | Place a gNB and a UE marker first |
-| Coordinates look wrong | The PNG is not a north-up lon/lat box, or its extent differs from the computed ±10 km tile (check `TILE_HALF_WIDTH_M`, or add explicit edge columns) |
-| Exported file has a duplicated block | The template's block or one of its keys did not match, so a fresh block was appended. Remove the old block |
+| "Atlas map not found" | `atlas_v2/bundle/context/pole_dem_160m.tif` is missing. Extract the context archive inside this folder |
+| "no GeoTIFF georeference tags" | The `.tif` lacks standard GeoTIFF tags. Tell me which file |
+| Cannot read a `.tif` | Pillow may not support its compression. Send me the `gdalinfo` output |
+| Atlas opens but has no markers | No `__dem.tif` files in `regions/`, or `sites.csv` names don't match them |
+| Status shows "no .bdem found" | Add a `.bdem` to `terrain/` (see section 3) |
+| Candidate checkbox is greyed out | `data/atlas_base/candidates_freeze.csv` is missing |
+| Default gNB not placed | The note in the status line says why: usually the saved position is outside the region's map, or the region name in `gnb_defaults.csv` doesn't match the file name |
+| Typed coordinates are rejected | They are outside the open region's map, or not numbers. Longitude is east-positive degrees |
+| Slow first load | The pole map is 3800 x 3800 pixels; it is shaded once, then cached |
 
 ---
 
-## 9. Known limitations and not yet built
+## 10. Limitations
 
-- Terrain elevation at each marker is not shown.
-- No flat-terrain (A/B) config export.
-- No reflector placement control.
-- No custom export names; folders are named automatically by site and time.
-- The window has been written but not yet tested on screen; please report any display problems.
+- The GUI has not been run on screen by me; the data logic was tested on synthetic GeoTIFFs matching your `gdalinfo`. Please report any display problems.
+- The region tiles' georeference and the `.bdem` coverage are unverified (no real files were available).
+- No terrain-elevation readout at the markers, and no flat-terrain (A/B) export.
+- Separation is a great-circle distance on the reference sphere, ignoring heights.
