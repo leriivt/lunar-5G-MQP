@@ -1,2 +1,6 @@
 *.tif
 *.tiff
+*.tar
+__pycache__/
+*.pyc
+.DS_Store

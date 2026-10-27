@@ -2,7 +2,7 @@
 
 Opens on a shaded-relief atlas of the lunar south pole. Click a region marker to open that region's terrain map, click to place the gNB and UE, then export OAI configuration files for the BICTR channel model (`bictr_channel.c`).
 
-**Does:** atlas view with a minimap that highlights the open region, region view, click-to-coordinates, gNB and UE placement by click or typed coordinates, per-region default gNB locations, antenna heights, dated config export, and a single block of colour settings.
+**Does:** atlas view with a minimap that highlights the open region, region view, click-to-coordinates, gNB and UE placement by click or typed coordinates, a one-click "Place optimal gNB" lookup against the candidate-mast coverage data, per-region default gNB locations, antenna heights, dated config export, and a single block of colour settings.
 **Does not:** run the simulation, edit terrain data, or convert `.tif` to `.bdem`.
 
 ---
@@ -14,36 +14,42 @@ Opens on a shaded-relief atlas of the lunar south pole. Click a region marker to
 | Python 3.8 or newer | |
 | tkinter | Included on Windows and macOS. Debian/Ubuntu: `sudo apt install python3-tk` |
 | Pillow and numpy | `pip install pillow numpy` (no GDAL or rasterio needed) |
+| pandas | `pip install pandas` — only needed for the **Place optimal gNB** button (loads `optimal_gNB.py`, see section 4a). The rest of the app runs without it. |
 
-Check: `python -c "import tkinter, PIL, numpy; print('OK')"`
+Check: `python -c "import tkinter, PIL, numpy, pandas; print('OK')"`
 
 ---
 
 ## 2. Folder structure
 
 ```
-lunar_site_planner/
-├── lunar_site_planner.py
-├── README.md
-├── sites.csv                                  site list (provided)
-├── gnb_defaults.csv                           saved default gNB per region (created/updated by the app)
+lunar-5G-MQP/                                  repo root
+├── optimal_gNB.py                             standalone CLI + find_best_mast(), used by the GUI button
+├── candidates_coverage.csv                    per-mast coverage area by frequency, keyed by cand_id
+├── site_tiles_index.csv                       region id -> name/bounding box, used to scope candidates to a region
 │
-├── atlas_v2/bundle/context/                   from lunarrf_atlas_context_v2.0.tar
-│   ├── pole_dem_160m.tif                      the opening atlas
-│   └── regions/
-│       ├── Haworth__dem.tif                   one per region (12 in this release)
-│       └── ...
-│
-├── data/atlas_base/
-│   └── candidates_freeze.csv                  optional: candidate masts overlay
-│
-├── terrain/                                   YOUR .bdem files (not in the Zenodo record)
-│   └── lunar_south_pole.bdem  (or per-region files)
-│
-└── exports/                                   created automatically
-    └── Haworth_2026-10-26_14-30-05/
-        ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
-        └── ue.bictr.conf
+└── files/                                      (this folder)
+    ├── lunar_site_planner.py
+    ├── README.md
+    ├── sites.csv                                  site list (provided)
+    ├── gnb_defaults.csv                           saved default gNB per region (created/updated by the app)
+    │
+    ├── atlas_v2/bundle/context/                   from lunarrf_atlas_context_v2.0.tar
+    │   ├── pole_dem_160m.tif                      the opening atlas
+    │   └── regions/
+    │       ├── Haworth__dem.tif                   one per region (12 in this release)
+    │       └── ...
+    │
+    ├── data/atlas_base/
+    │   └── candidates_freeze.csv                  optional: candidate masts overlay
+    │
+    ├── terrain/                                   YOUR .bdem files (not in the Zenodo record)
+    │   └── lunar_south_pole.bdem  (or per-region files)
+    │
+    └── exports/                                   created automatically
+        └── Haworth_2026-10-26_14-30-05/
+            ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
+            └── ue.bictr.conf
 ```
 
 ---
@@ -93,6 +99,8 @@ python lunar_site_planner.py
    - **Type coordinates.** Enter longitude and latitude in that node's boxes and press **Place** or Enter. The marker appears on the map and that node becomes the active one for map clicks. Clicking into a node's lon/lat box also makes it the active node.
 
    Clicks or typed positions outside the region's map are rejected.
+
+   - **Place optimal gNB (2.58 GHz):** instead of clicking or typing, this button in the gNB group looks up the open region in `site_tiles_index.csv`, picks the candidate mast in `candidates_coverage.csv` with the largest coverage area at 2.58 GHz, and places it (height included) the same way a typed position would be. Requires `pandas` (section 1) and the two CSVs at the repo root (section 2). See the troubleshooting table if it reports an error instead.
 3. **Heights:** each node has a height box: gNB 4.0 m and UE 1.5 m by default (the atlas `mast_height_m` and `rx_height_m`).
 4. **Default gNB (optional):** see section 5.
 5. **Separation** between the two nodes is shown under the groups.
@@ -180,6 +188,9 @@ Region tiles are assumed to use the same projection as the pole map. If a region
 | Default gNB not placed | The note in the status line says why: usually the saved position is outside the region's map, or the region name in `gnb_defaults.csv` doesn't match the file name |
 | Typed coordinates are rejected | They are outside the open region's map, or not numbers. Longitude is east-positive degrees |
 | Slow first load | The pole map is 3800 x 3800 pixels; it is shaded once, then cached |
+| "Missing dependency" from Place optimal gNB | `pandas` is not installed: `pip install pandas` |
+| Place optimal gNB: "No candidate mast found" | The region's id (from `sites.csv`) has no matching row in `site_tiles_index.csv`, or no candidates in `candidates_coverage.csv` fall inside that region's bounding box |
+| Place optimal gNB: file-not-found / outside the tile | `candidates_coverage.csv` or `site_tiles_index.csv` is missing from the repo root, or the best mast for that region lies outside the region's `.tif` footprint |
 
 ---
 
