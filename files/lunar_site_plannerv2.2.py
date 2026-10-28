@@ -15,6 +15,7 @@ import csv
 import math
 import os
 import re
+import sys
 import tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,6 +31,7 @@ Image.MAX_IMAGE_PIXELS = None
 # 1. SETTINGS
 # ----------------------------------------------------------------------------
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(APP_DIR)                                      # repo root (one level up from files/)
 ATLAS_DIR = os.path.join(APP_DIR, "atlas_v2", "bundle", "context")      # from the Zenodo archive
 POLE_DEM = os.path.join(ATLAS_DIR, "pole_dem_160m.tif")
 REGION_DIR = os.path.join(ATLAS_DIR, "regions")                          # <Region>__dem.tif
@@ -40,6 +42,13 @@ POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m
 MINI_PX = 210                            # size of the atlas minimap in the side panel
+
+# optimal_gNB.py lives at the repo root, alongside its coverage/index CSVs
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+OPTIMAL_GNB_CANDIDATES_CSV = os.path.join(ROOT_DIR, "candidates_coverage.csv")
+OPTIMAL_GNB_INDEX_CSV = os.path.join(ROOT_DIR, "site_tiles_index.csv")
+OPTIMAL_GNB_FREQ_GHZ = 2.580
 
 BODY_RADIUS_M = 1_737_400.0              # Moon sphere used by the atlas and bictr_body_radius
 GNB_HEIGHT_M = 4.0                       # atlas radio_params.json: mast_height_m
@@ -432,6 +441,9 @@ class PlannerApp(tk.Tk):
                 entry.bind("<Return>", lambda e, w=who: self.place_from_entries(w))
             ttk.Button(row, text="Place", width=6,
                        command=lambda w=who: self.place_from_entries(w)).pack(side="left")
+            if who == "gNB":
+                ttk.Button(group, text=f"Place optimal gNB ({OPTIMAL_GNB_FREQ_GHZ:g} GHz)",
+                           command=self.place_optimal_gnb).pack(fill="x", pady=(5, 0))
 
         group = ttk.LabelFrame(panel, text=" gNB default for this region ", padding=6)
         group.pack(fill="x", pady=3)
@@ -716,6 +728,51 @@ class PlannerApp(tk.Tk):
             self.status.set(f"Cleared the default gNB for {self.region.label}.")
         else:
             self.status.set("No saved default for this region.")
+
+    def place_optimal_gnb(self):
+        """Run optimal_gNB.find_best_mast() for the open region and place the result as the gNB."""
+        if self.mode != "region":
+            messagebox.showinfo("Open a region", "Open a region first.")
+            return
+        try:
+            from optimal_gNB import find_best_mast
+        except ImportError as err:
+            messagebox.showerror("Missing dependency",
+                                  f"Could not load optimal_gNB.py: {err}\n(pip install pandas)")
+            return
+        region_id = int(self.region.sites[0][0])
+        try:
+            best = find_best_mast(
+                region_id=region_id,
+                freq_GHz=OPTIMAL_GNB_FREQ_GHZ,
+                candidates_csv=OPTIMAL_GNB_CANDIDATES_CSV,
+                index_csv=OPTIMAL_GNB_INDEX_CSV,
+            )
+        except (OSError, ValueError) as err:
+            messagebox.showerror("Optimal gNB", str(err))
+            return
+        if best is None:
+            messagebox.showwarning(
+                "Optimal gNB",
+                f"No candidate mast found for {self.region.label} "
+                f"(region id {region_id}) in site_tiles_index.csv.")
+            return
+        lon, lat = float(best["lon_e"]), float(best["lat"])
+        fx, fy = self.raster.xy_to_frac(*lonlat_to_xy(lon, lat))
+        if not (0 <= fx <= 1 and 0 <= fy <= 1):
+            messagebox.showwarning("Outside the tile",
+                                    "The optimal mast for this region lies outside its terrain tile.")
+            return
+        self.points["gNB"] = (fx, fy)
+        self.height_vars["gNB"].set(f"{float(best['mast_height_m']):g}")
+        self.active.set("gNB")
+        self.update_readout()
+        self.redraw()
+        coverage_col = f"area_km2_{OPTIMAL_GNB_FREQ_GHZ:.3f}GHz"
+        self.status.set(
+            f"Optimal gNB for {self.region.label}: mast {best['cand_id']} "
+            f"({lon:.5f}, {lat:.5f}), {float(best[coverage_col]):.1f} km² "
+            f"coverage @ {OPTIMAL_GNB_FREQ_GHZ:g} GHz.")
 
     # ---- export --------------------------------------------------------------
     def choose_template_dir(self):
