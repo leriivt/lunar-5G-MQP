@@ -125,7 +125,7 @@ def _shade(arr, mask, cell, azimuth=315.0, altitude=35.0):
     """Hillshade picture (8-bit greyscale) from an elevation array."""
     z = np.where(mask, arr[~mask].mean() if (~mask).any() else 0.0, arr)
     gy, gx = np.gradient(z, cell)
-    dzdx, dzdy = gx, -gy                                  # rows run south, so flip y
+    dzdx, dzdy = -gx, gy
     slope = np.arctan(np.hypot(dzdx, dzdy))
     aspect = np.arctan2(dzdy, -dzdx)
     az, alt = np.radians((360.0 - azimuth + 90.0) % 360.0), np.radians(altitude)
