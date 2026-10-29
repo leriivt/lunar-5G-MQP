@@ -79,6 +79,7 @@ THEME = {
     "footprint": "#00e5ff",          # box showing the open region's extent on the atlas
     "gnb": "#c62828", "ue": "#1565c0",                  # gNB / UE markers and panel headings
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
+    "grid": "#81eb88", "grid_label": "#b2ebf2",
 }
 
 
@@ -103,6 +104,41 @@ def distance_m(a, b):
          + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
     return 2 * BODY_RADIUS_M * math.asin(math.sqrt(h))
 
+#helper functions for drawing map projected grid lines
+GRID_STEPS = (0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+              1, 2, 5, 10, 15, 30, 45)
+
+
+def grid_step(span, target=6):
+    """Smallest 'nice' step that gives at most `target` lines across `span` degrees."""
+    for s in GRID_STEPS:
+        if span / s <= target:
+            return s
+    return GRID_STEPS[-1]
+
+
+def frange(a, b, step):
+    """Multiples of `step` between a and b (inclusive)."""
+    k = math.ceil(a / step - 1e-9)
+    while k * step <= b + 1e-9:
+        yield round(k * step, 9)
+        k += 1
+
+
+def raster_lonlat_extent(raster, n=24):
+    """(lon_min, lon_max, lat_min, lat_max, pole_inside) covered by a raster."""
+    lons, lats = [], []
+    for i in range(n + 1):
+        for j in range(n + 1):
+            lon, lat = xy_to_lonlat(*raster.frac_to_xy(i / n, j / n))
+            lons.append(lon)
+            lats.append(lat)
+    fx, fy = raster.xy_to_frac(0.0, 0.0)
+    if 0 <= fx <= 1 and 0 <= fy <= 1:                    # the pole is in the picture
+        return -180.0, 180.0, -90.0, max(lats), True
+    ref = lons[len(lons) // 2]                           # unwrap so tiles crossing +-180 work
+    lons = [((l - ref + 180) % 360) - 180 + ref for l in lons]
+    return min(lons), max(lons), min(lats), max(lats), False
 
 # ----------------------------------------------------------------------------
 # 3. RASTERS  (GeoTIFF read with Pillow; georeference from the TIFF tags)
@@ -458,6 +494,10 @@ class PlannerApp(tk.Tk):
                         command=self.redraw,
                         state="normal" if self.candidates else "disabled").pack(anchor="w", pady=4)
 
+        self.show_grid = tk.BooleanVar(value=False)
+        ttk.Checkbutton(panel, text="Show lon/lat grid", variable=self.show_grid,
+                        command=self.redraw).pack(anchor="w")
+
         ttk.Button(panel, text="Set OAI CONF template folder (optional)",
                    command=self.choose_template_dir).pack(fill="x")
         ttk.Button(panel, text="Export gNB + UE configs...", command=self.export).pack(fill="x", pady=4)
@@ -545,6 +585,8 @@ class PlannerApp(tk.Tk):
         shown = self.raster.display.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
         self.photo = ImageTk.PhotoImage(shown)
         c.create_image(ox, oy, anchor="nw", image=self.photo)
+        if self.show_grid.get():
+            self._draw_grid()
         if self.mode == "atlas":
             self._draw_atlas_markers()
         else:
@@ -620,6 +662,54 @@ class PlannerApp(tk.Tk):
                 c.create_oval(cx - 8, cy - 8, cx + 8, cy + 8, fill=t["gnb" if who == "gNB" else "ue"],
                               outline=t["marker_outline"], width=2)
                 self._label(c, cx + 11, cy - 11, who, t["label_fg"], "sw", bold=True, clamp=size)
+
+    def _draw_grid(self):
+        r, c, t = self.raster, self.canvas, THEME
+        lon0, lon1, lat0, lat1, pole = raster_lonlat_extent(r)
+        pad = (lat1 - lat0) * 0.05                       # sampled extent slightly underestimates
+        lat0, lat1 = max(-90.0, lat0 - pad), min(-0.1, lat1 + pad)
+        if not pole:
+            pad = (lon1 - lon0) * 0.05
+            lon0, lon1 = lon0 - pad, lon1 + pad
+        lat_step = grid_step(lat1 - lat0)
+        lon_step = 30 if pole else grid_step(lon1 - lon0)
+        size = (c.winfo_width(), c.winfo_height())
+
+        def trace(points, text, anchor):
+            """Project the points, draw each on-screen run as a dashed line, label its start."""
+            run, runs = [], []
+            for lon, lat in points:
+                fx, fy = r.xy_to_frac(*lonlat_to_xy(lon, lat))
+                if -0.02 <= fx <= 1.02 and -0.02 <= fy <= 1.02:
+                    run.append(self._canvas_xy(fx, fy))
+                elif run:
+                    runs.append(run)
+                    run = []
+            if run:
+                runs.append(run)
+            for pts in runs:
+                if len(pts) >= 2:
+                    #c.create_line(*[v for p in pts for v in p], fill=t["grid"], dash=(3, 4)) #dashed line
+                    c.create_line(*[v for p in pts for v in p], fill=t["grid"], width=2) #solid line
+            if runs and runs[0]:
+                self._label(c, *runs[0][0], text, t["grid_label"], anchor,
+                            size=max(self.font_size - 1, 7), clamp=size)
+
+        def fmt(v, step):
+            d = max(0, math.ceil(-math.log10(step) - 1e-9))
+            return f"{v:.{d}f}\u00b0"
+
+        n = 120
+        for lat in frange(lat0, lat1, lat_step):          # parallels
+            if lat <= -90.0:
+                continue
+            pts = [(lon0 + (lon1 - lon0) * i / n, lat) for i in range(n + 1)]
+            trace(pts, fmt(lat, lat_step), "sw")
+        lon_end = lon1 - 1e-9 if pole else lon1            # avoid drawing -180 and +180 twice
+        for lon in frange(lon0, lon_end, lon_step):       # meridians
+            pts = [(lon, lat0 + (lat1 - lat0) * i / 60) for i in range(61)]
+            shown = ((lon + 180) % 360) - 180
+            trace(pts, fmt(shown, lon_step), "nw")    
 
     # ---- clicks --------------------------------------------------------------
     def _frac(self, event):
