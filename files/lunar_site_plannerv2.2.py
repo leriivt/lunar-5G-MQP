@@ -33,6 +33,7 @@ Image.MAX_IMAGE_PIXELS = None
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(APP_DIR)                                      # repo root (one level up from files/)
 ATLAS_DIR = os.path.join(APP_DIR, "atlas_v2", "bundle", "context")      # from the Zenodo archive
+BUNDLE_DIR = os.path.join(APP_DIR, "atlas_v2", "bundle")
 POLE_DEM = os.path.join(ATLAS_DIR, "pole_dem_160m.tif")
 REGION_DIR = os.path.join(ATLAS_DIR, "regions")                          # <Region>__dem.tif
 CANDIDATES_CSV = os.path.join(APP_DIR, "data", "atlas_base", "candidates_freeze.csv")
@@ -40,6 +41,11 @@ SITES_CSV = os.path.join(APP_DIR, "sites.csv")                           # id,na
 TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # your .bdem files
 POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific .bdem
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
+# Topographic overlays: transparent *_topo_hq.png files, searched in these folders in order
+TOPO_POLE_FOLDERS = [ATLAS_DIR, BUNDLE_DIR]
+TOPO_REGION_FOLDERS = [REGION_DIR, os.path.join(BUNDLE_DIR, "regions"), ATLAS_DIR]
+TOPO_OPACITY = 0.8                       # starting opacity of the overlay (0 to 1)
+OVERLAY_MAX_PX = 3000                    # overlays are shrunk to at most this many pixels per side
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m
 MINI_PX = 210                            # size of the atlas minimap in the side panel
 
@@ -134,6 +140,36 @@ def _shade(arr, mask, cell, azimuth=315.0, altitude=35.0):
     out = np.clip((s - lo) / (hi - lo + 1e-9), 0, 1) * 220 + 25
     out[mask] = 0
     return Image.fromarray(out.astype(np.uint8))
+
+
+def resize_rgba(img, size):
+    """Resize an RGBA picture without dark fringes around transparent pixels."""
+    return img.convert("RGBa").resize(size, Image.LANCZOS).convert("RGBA")
+
+
+def load_overlay(path):
+    """Load a transparent overlay PNG as RGBA, shrunk if very large."""
+    img = Image.open(path).convert("RGBa")
+    img.thumbnail((OVERLAY_MAX_PX, OVERLAY_MAX_PX), Image.LANCZOS)
+    return img.convert("RGBA")
+
+
+def find_topo_overlay(stem=None):
+    """Path of the *_topo_hq.png overlay for a region (by file stem), or for the pole
+    atlas when stem is None. Matches e.g. Haworth__topo_hq.png or Haworth__dem_topo_hq.png
+    (a region name never matches a longer one, so Mons_Mouton != Mons_Mouton_Plateau)."""
+    pattern = re.compile(rf"{re.escape(stem)}_*(dem_*)?topo_hq\.png", re.I) if stem else None
+    for folder in (TOPO_REGION_FOLDERS if stem else TOPO_POLE_FOLDERS):
+        if not os.path.isdir(folder):
+            continue
+        names = sorted(f for f in os.listdir(folder) if f.lower().endswith("topo_hq.png"))
+        if stem:
+            hits = [f for f in names if pattern.fullmatch(f)]
+        else:
+            hits = [f for f in names if re.search(r"pole|atlas|south", f, re.I)] or (names if len(names) == 1 else [])
+        if hits:
+            return os.path.join(folder, hits[0])
+    return None
 
 
 class Raster:
@@ -390,6 +426,8 @@ class PlannerApp(tk.Tk):
         self.photo = None
         self.mini_photo = None
         self.gnb_defaults = load_gnb_defaults()
+        self._topo_cache = {}           # view key (region stem or None) -> (overlay image or None, path)
+        self._bg_key = self._bg_img = None   # cached map background (map + overlay)
         self.points = {"gNB": None, "UE": None}      # (fx, fy) fractions of the region picture
         self.template_dir = ""
         self._view = (1.0, 0, 0, 1, 1)               # scale, x offset, y offset, picture w, h
@@ -456,7 +494,13 @@ class PlannerApp(tk.Tk):
         self.show_cands = tk.BooleanVar(value=False)
         ttk.Checkbutton(panel, text="Show atlas candidate masts", variable=self.show_cands,
                         command=self.redraw,
-                        state="normal" if self.candidates else "disabled").pack(anchor="w", pady=4)
+                        state="normal" if self.candidates else "disabled").pack(anchor="w", pady=(4, 0))
+        row = ttk.Frame(panel)
+        row.pack(fill="x", pady=(0, 4))
+        self.show_topo = tk.BooleanVar(value=False)
+        self.topo_opacity = tk.DoubleVar(value=TOPO_OPACITY)
+        ttk.Checkbutton(row, text="Topographic overlay", variable=self.show_topo,
+                        command=self.on_topo_toggle).pack(side="left")
 
         ttk.Button(panel, text="Set OAI CONF template folder (optional)",
                    command=self.choose_template_dir).pack(fill="x")
@@ -492,6 +536,7 @@ class PlannerApp(tk.Tk):
         except (OSError, ValueError) as err:
             self.raster = None
             messagebox.showerror("Atlas", f"Cannot read {POLE_DEM}\n{err}")
+        self._append_topo_note()
         self.update_readout(clear=True)
         self.redraw()
 
@@ -509,6 +554,7 @@ class PlannerApp(tk.Tk):
         bdem = find_bdem(stem)
         warn = "" if os.path.exists(bdem) else "  WARNING: no .bdem found for this region."
         self.status.set(f"{region.label}: click the map or type coordinates.{note}{warn}")
+        self._append_topo_note()
         self.update_readout(clear=True)
         self.redraw()
 
@@ -542,13 +588,61 @@ class PlannerApp(tk.Tk):
         scale = min(cw / iw, ch / ih)
         ox, oy = (cw - iw * scale) / 2, (ch - ih * scale) / 2
         self._view = (scale, ox, oy, iw, ih)
-        shown = self.raster.display.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
-        self.photo = ImageTk.PhotoImage(shown)
+        size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
+        self.photo = ImageTk.PhotoImage(self._background(size))
         c.create_image(ox, oy, anchor="nw", image=self.photo)
         if self.mode == "atlas":
             self._draw_atlas_markers()
         else:
             self._draw_region_overlays()
+
+    # ---- topographic overlay -------------------------------------------------
+    def _current_overlay(self):
+        """The overlay picture for the map on screen (None if there is none)."""
+        key = self.region.stem if self.mode == "region" and self.region else None
+        if key not in self._topo_cache:
+            path = find_topo_overlay(key)
+            try:
+                img = load_overlay(path) if path else None
+            except (OSError, ValueError):
+                img = None
+            self._topo_cache[key] = (img, path)
+        return self._topo_cache[key][0]
+
+    def _topo_note(self):
+        """Why the overlay is missing or may not line up; empty if all is well."""
+        if self.raster is None:
+            return ""
+        img = self._current_overlay()
+        if img is None:
+            return "No topographic overlay (*_topo_hq.png) found for this view."
+        if abs((img.width / img.height) / (self.raster.width / self.raster.height) - 1) > 0.01:
+            return "The overlay has a different shape from the map, so it is stretched and may not line up."
+        return ""
+
+    def _append_topo_note(self):
+        if self.show_topo.get() and self._topo_note():
+            self.status.set(self.status.get() + "  " + self._topo_note())
+
+    def on_topo_toggle(self):
+        if self.show_topo.get():
+            self.status.set(self._topo_note() or "Topographic overlay on.")
+        self.redraw()
+
+    def _background(self, size):
+        """The map picture at `size`, with the overlay composited on top when it is switched on."""
+        overlay = self._current_overlay() if self.show_topo.get() else None
+        opacity = round(self.topo_opacity.get(), 2)
+        key = (id(self.raster), size, id(overlay), opacity)
+        if key != self._bg_key:
+            base = self.raster.display.resize(size)
+            if overlay is not None:
+                base = base.convert("RGBA")
+                top = resize_rgba(overlay, size)
+                top.putalpha(top.getchannel("A").point(lambda a: int(a * opacity)))
+                base = Image.alpha_composite(base, top)
+            self._bg_img, self._bg_key = base, key
+        return self._bg_img
 
     def _canvas_xy(self, fx, fy):
         scale, ox, oy, iw, ih = self._view
