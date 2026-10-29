@@ -2,7 +2,7 @@
 
 Opens on a shaded-relief atlas of the lunar south pole. Click a region marker to open that region's terrain map, click to place the gNB and UE, then export OAI configuration files for the BICTR channel model (`bictr_channel.c`).
 
-**Does:** atlas view with a minimap that highlights the open region, region view, click-to-coordinates, gNB and UE placement by click or typed coordinates, a one-click "Place optimal gNB" lookup against the candidate-mast coverage data, per-region default gNB locations, antenna heights, dated config export, and a single block of colour settings.
+**Does:** atlas view with a minimap that highlights the open region, region view, click-to-coordinates, gNB and UE placement by click or typed coordinates, per-region default gNB locations, antenna heights, dated config export, and a single block of colour settings.
 **Does not:** run the simulation, edit terrain data, or convert `.tif` to `.bdem`.
 
 ---
@@ -16,40 +16,37 @@ Opens on a shaded-relief atlas of the lunar south pole. Click a region marker to
 | Pillow and numpy | `pip install pillow numpy` (no GDAL or rasterio needed) |
 | pandas | `pip install pandas` — only needed for the **Place optimal gNB** button (loads `optimal_gNB.py`, see section 4a). The rest of the app runs without it. |
 
-Check: `python -c "import tkinter, PIL, numpy, pandas; print('OK')"`
+Check: `python -c "import tkinter, PIL, numpy; print('OK')"`
 
 ---
 
 ## 2. Folder structure
 
 ```
-lunar-5G-MQP/                                  repo root
-├── optimal_gNB.py                             standalone CLI + find_best_mast(), used by the GUI button
-├── candidates_coverage.csv                    per-mast coverage area by frequency, keyed by cand_id
-├── site_tiles_index.csv                       region id -> name/bounding box, used to scope candidates to a region
+lunar_site_planner/
+├── lunar_site_planner.py
+├── README.md
+├── sites.csv                                  site list (provided)
+├── gnb_defaults.csv                           saved default gNB per region (created/updated by the app)
 │
-└── files/                                      (this folder)
-    ├── lunar_site_planner.py
-    ├── README.md
-    ├── sites.csv                                  site list (provided)
-    ├── gnb_defaults.csv                           saved default gNB per region (created/updated by the app)
-    │
-    ├── atlas_v2/bundle/context/                   from lunarrf_atlas_context_v2.0.tar
-    │   ├── pole_dem_160m.tif                      the opening atlas
-    │   └── regions/
-    │       ├── Haworth__dem.tif                   one per region (12 in this release)
-    │       └── ...
-    │
-    ├── data/atlas_base/
-    │   └── candidates_freeze.csv                  optional: candidate masts overlay
-    │
-    ├── terrain/                                   YOUR .bdem files (not in the Zenodo record)
-    │   └── lunar_south_pole.bdem  (or per-region files)
-    │
-    └── exports/                                   created automatically
-        └── Haworth_2026-10-26_14-30-05/
-            ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
-            └── ue.bictr.conf
+├── atlas_v2/bundle/context/                   from lunarrf_atlas_context_v2.0.tar
+│   ├── pole_dem_160m.tif                      the opening atlas
+│   ├── ..._topo_hq.png                        optional: transparent topographic overlay for the atlas
+│   └── regions/
+│       ├── Haworth__dem.tif                   one per region (12 in this release)
+│       ├── Haworth__topo_hq.png               optional: transparent topographic overlay for the region
+│       └── ...
+│
+├── data/atlas_base/
+│   └── candidates_freeze.csv                  optional: candidate masts overlay
+│
+├── terrain/                                   YOUR .bdem files (not in the Zenodo record)
+│   └── lunar_south_pole.bdem  (or per-region files)
+│
+└── exports/                                   created automatically
+    └── Haworth_2026-10-26_14-30-05/
+        ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
+        └── ue.bictr.conf
 ```
 
 ---
@@ -105,8 +102,9 @@ python lunar_site_planner.py
 4. **Default gNB (optional):** see section 5.
 5. **Separation** between the two nodes is shown under the groups.
 6. **Candidate masts (optional):** tick *Show atlas candidate masts* to overlay the atlas's candidate transmitter positions (orange = ridge, green = landing site) as a guide for placement.
-7. **Export:** optionally set the OAI `CONF` template folder, then click *Export* and choose a parent folder. A new subfolder named `<Region>_<YYYY-MM-DD>_<HH-MM-SS>` is created.
-8. **Back to atlas** returns to the pole view.
+7. **Topographic overlay (optional):** tick *Topographic overlay* to draw the transparent `_topo_hq.png` map over the atlas or the open region, and use the **opacity** slider to make it stronger or fainter. The setting stays on as you move between the atlas and regions. If a view has no overlay file, the status line says so. The overlay is only a visual aid; it does not affect coordinates or exports.
+8. **Export:** optionally set the OAI `CONF` template folder, then click *Export* and choose a parent folder. A new subfolder named `<Region>_<YYYY-MM-DD>_<HH-MM-SS>` is created.
+9. **Back to atlas** returns to the pole view.
 
 ---
 
@@ -151,7 +149,22 @@ Colours are hex codes such as `"#ffffff"`. Map labels sit on dark plates so they
 
 ---
 
-## 7. Outputs
+## 7. Topographic overlay files
+
+The overlay is read from transparent PNG files whose names end in `_topo_hq.png`. The app looks for them in these folders, in order:
+
+| View | Folders searched | File name accepted |
+|---|---|---|
+| Atlas | `atlas_v2/bundle/context/`, then `atlas_v2/bundle/` | a `_topo_hq.png` whose name contains `pole`, `atlas` or `south` (or the only one in the folder) |
+| Region | `.../context/regions/`, then `atlas_v2/bundle/regions/`, then `.../context/` | `<Region>_topo_hq.png`, `<Region>__topo_hq.png` or `<Region>__dem_topo_hq.png`, for example `Haworth__topo_hq.png` |
+
+A region name never matches a longer one, so `Mons_Mouton` does not pick up `Mons_Mouton_Plateau__topo_hq.png`.
+
+**Alignment.** The overlay is stretched to the full extent of the map underneath, so it must cover exactly the same area as the DEM it belongs to (same edges, no margins, axes or labels). If its shape differs from the map by more than 1%, the status line warns that it may not line up. Very large overlays are shrunk to 3000 pixels per side for speed. `TOPO_OPACITY` in the settings block sets the starting opacity, and `TOPO_POLE_FOLDERS` and `TOPO_REGION_FOLDERS` set where to look.
+
+---
+
+## 8. Outputs
 
 Each export folder holds `gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf` and `ue.bictr.conf`. Both contain both model entries with TX and RX swapped:
 
@@ -167,7 +180,7 @@ Each entry has `bictr_tx_lon/lat/height`, `bictr_rx_lon/lat/height`, `bictr_body
 
 ---
 
-## 8. How coordinates are computed
+## 9. How coordinates are computed
 
 The atlas maps use a south polar stereographic projection on the 1,737.4 km Moon sphere (origin at the pole, central meridian 0). The app reads each GeoTIFF's own georeference, converts the click to projected metres, then inverts the projection to longitude (east-positive) and latitude. This was checked against all 11,827 rows of `candidates_freeze.csv` and matched to machine precision.
 
@@ -175,7 +188,7 @@ Region tiles are assumed to use the same projection as the pole map. If a region
 
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
@@ -187,6 +200,8 @@ Region tiles are assumed to use the same projection as the pole map. If a region
 | Candidate checkbox is greyed out | `data/atlas_base/candidates_freeze.csv` is missing |
 | Default gNB not placed | The note in the status line says why: usually the saved position is outside the region's map, or the region name in `gnb_defaults.csv` doesn't match the file name |
 | Typed coordinates are rejected | They are outside the open region's map, or not numbers. Longitude is east-positive degrees |
+| "No topographic overlay found" | No matching `_topo_hq.png` in the folders listed in section 7. Check the file name starts with the region name (for example `Haworth`) and sits in `regions/` |
+| Overlay does not line up | The PNG does not cover exactly the same area as the map (margins, axes or a different crop). Re-export it to the DEM's exact extent |
 | Slow first load | The pole map is 3800 x 3800 pixels; it is shaded once, then cached |
 | "Missing dependency" from Place optimal gNB | `pandas` is not installed: `pip install pandas` |
 | Place optimal gNB: "No candidate mast found" | The region's id (from `sites.csv`) has no matching row in `site_tiles_index.csv`, or no candidates in `candidates_coverage.csv` fall inside that region's bounding box |
@@ -194,7 +209,7 @@ Region tiles are assumed to use the same projection as the pole map. If a region
 
 ---
 
-## 10. Limitations
+## 11. Limitations
 
 - The GUI has not been run on screen by me; the data logic was tested on synthetic GeoTIFFs matching your `gdalinfo`. Please report any display problems.
 - The region tiles' georeference and the `.bdem` coverage are unverified (no real files were available).
