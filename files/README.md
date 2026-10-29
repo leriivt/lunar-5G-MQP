@@ -2,7 +2,7 @@
 
 Opens on a shaded-relief atlas of the lunar south pole. Click a region marker to open that region's terrain map, click to place the gNB and UE, then export OAI configuration files for the BICTR channel model (`bictr_channel.c`).
 
-**Does:** atlas view with a minimap that highlights the open region, region view, click-to-coordinates, gNB and UE placement by click or typed coordinates, per-region default gNB locations, antenna heights, dated config export, and a single block of colour settings.
+**Does:** atlas view with a minimap that highlights the open region, region view, click-to-coordinates, gNB and UE placement by click or typed coordinates, a one-click "Place optimal gNB" lookup against the candidate-mast coverage data, per-region default gNB locations, antenna heights, dated config export, and a single block of colour settings.
 **Does not:** run the simulation, edit terrain data, or convert `.tif` to `.bdem`.
 
 ---
@@ -16,37 +16,42 @@ Opens on a shaded-relief atlas of the lunar south pole. Click a region marker to
 | Pillow and numpy | `pip install pillow numpy` (no GDAL or rasterio needed) |
 | pandas | `pip install pandas` — only needed for the **Place optimal gNB** button (loads `optimal_gNB.py`, see section 4a). The rest of the app runs without it. |
 
-Check: `python -c "import tkinter, PIL, numpy; print('OK')"`
+Check: `python -c "import tkinter, PIL, numpy, pandas; print('OK')"`
 
 ---
 
 ## 2. Folder structure
 
 ```
-lunar_site_planner/
-├── lunar_site_planner.py
-├── README.md
-├── sites.csv                                  site list (provided)
-├── gnb_defaults.csv                           saved default gNB per region (created/updated by the app)
+lunar-5G-MQP/                                  repo root
+├── optimal_gNB.py                             standalone CLI + find_best_mast(), used by the GUI button
+├── candidates_coverage.csv                    per-mast coverage area by frequency, keyed by cand_id
+├── site_tiles_index.csv                       region id -> name/bounding box, used to scope candidates to a region
 │
-├── atlas_v2/bundle/context/                   from lunarrf_atlas_context_v2.0.tar
-│   ├── pole_dem_160m.tif                      the opening atlas
-│   ├── ..._topo_hq.png                        optional: transparent topographic overlay for the atlas
-│   └── regions/
-│       ├── Haworth__dem.tif                   one per region (12 in this release)
-│       ├── Haworth__topo_hq.png               optional: transparent topographic overlay for the region
-│       └── ...
-│
-├── data/atlas_base/
-│   └── candidates_freeze.csv                  optional: candidate masts overlay
-│
-├── terrain/                                   YOUR .bdem files (not in the Zenodo record)
-│   └── lunar_south_pole.bdem  (or per-region files)
-│
-└── exports/                                   created automatically
-    └── Haworth_2026-10-26_14-30-05/
-        ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
-        └── ue.bictr.conf
+└── files/                                      (this folder)
+    ├── lunar_site_planner.py
+    ├── README.md
+    ├── sites.csv                                  site list (provided)
+    ├── gnb_defaults.csv                           saved default gNB per region (created/updated by the app)
+    │
+    ├── atlas_v2/bundle/context/                   from lunarrf_atlas_context_v2.0.tar
+    │   ├── pole_dem_160m.tif                      the opening atlas
+    │   ├── ..._topo_hq.png                        optional: transparent topographic overlay for the atlas
+    │   └── regions/
+    │       ├── Haworth__dem.tif                   one per region (12 in this release)
+    │       ├── Haworth__topo_hq.png               optional: transparent topographic overlay for the region
+    │       └── ...
+    │
+    ├── data/atlas_base/
+    │   └── candidates_freeze.csv                  optional: candidate masts overlay
+    │
+    ├── terrain/                                   YOUR .bdem files (not in the Zenodo record)
+    │   └── lunar_south_pole.bdem  (or per-region files)
+    │
+    └── exports/                                   created automatically
+        └── Haworth_2026-10-26_14-30-05/
+            ├── gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf
+            └── ue.bictr.conf
 ```
 
 ---
