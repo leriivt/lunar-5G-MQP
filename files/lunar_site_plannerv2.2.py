@@ -46,6 +46,12 @@ TOPO_POLE_FOLDERS = [ATLAS_DIR, BUNDLE_DIR]
 TOPO_REGION_FOLDERS = [REGION_DIR, os.path.join(BUNDLE_DIR, "regions"), ATLAS_DIR]
 TOPO_OPACITY = 0.8                       # starting opacity of the overlay (0 to 1)
 OVERLAY_MAX_PX = 3000                    # overlays are shrunk to at most this many pixels per side
+# Permanently shadowed regions (PSR): <Region>__psr.tif in REGION_DIR, and POLE_PSR for the atlas
+POLE_PSR = os.path.join(ATLAS_DIR, "pole_psr_160m.tif")
+PSR_OPACITY = 0.5                        # how solid the shadow tint is (0 to 1)
+PSR_THRESHOLD = 0.5                      # for files holding 0..1 values: at or above this = shadowed
+PSR_INVERT = False                       # True if the files mark shadowed areas as 0 instead of 1
+PSR_MAX_PX = 3000                        # PSR pictures are shrunk to at most this many pixels per side
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m
 MINI_PX = 210                            # size of the atlas minimap in the side panel
 
@@ -85,6 +91,7 @@ THEME = {
     "footprint": "#00e5ff",          # box showing the open region's extent on the atlas
     "gnb": "#c62828", "ue": "#1565c0",                  # gNB / UE markers and panel headings
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
+    "psr": "#29b6f6",                # tint for permanently shadowed regions
 }
 
 
@@ -131,7 +138,7 @@ def _shade(arr, mask, cell, azimuth=315.0, altitude=35.0):
     """Hillshade picture (8-bit greyscale) from an elevation array."""
     z = np.where(mask, arr[~mask].mean() if (~mask).any() else 0.0, arr)
     gy, gx = np.gradient(z, cell)
-    dzdx, dzdy = gx, -gy                                  # rows run south, so flip y
+    dzdx, dzdy = -gx, gy                                  # rows run south, so flip y
     slope = np.arctan(np.hypot(dzdx, dzdy))
     aspect = np.arctan2(dzdy, -dzdx)
     az, alt = np.radians((360.0 - azimuth + 90.0) % 360.0), np.radians(altitude)
@@ -202,6 +209,46 @@ class Raster:
 # ----------------------------------------------------------------------------
 # 4. CATALOG  (sites.csv -> regions; .bdem lookup; candidate masts)
 # ----------------------------------------------------------------------------
+class PsrLayer:
+    """Permanently shadowed regions from a GeoTIFF, as a tinted RGBA picture that keeps its own
+    georeference, so it lines up with the map even if its extent differs a little."""
+    def __init__(self, path):
+        with Image.open(path) as img:
+            x0, y0, dx, dy = _geotags(img)
+            nodata = img.tag_v2.get(42113)
+            arr = np.array(img, dtype=np.float32)
+        if arr.ndim == 3:
+            arr = arr[..., 0]
+        h, w = arr.shape
+        self.x0, self.y0, self.x1, self.y1 = x0, y0, x0 + w * dx, y0 - h * dy
+        valid = np.isfinite(arr)
+        try:
+            valid &= arr != float(str(nodata).strip("\x00"))
+        except (TypeError, ValueError):
+            pass
+        top = arr[valid].max() if valid.any() else 0.0
+        mask = (arr >= PSR_THRESHOLD) if top <= 1.0 else (arr > 0)     # 0..1 values or 0/255 style masks
+        if PSR_INVERT:
+            mask = ~mask
+        mask &= valid
+        rgba = np.zeros((h, w, 4), np.uint8)
+        rgba[mask] = [int(THEME["psr"][i:i + 2], 16) for i in (1, 3, 5)] + [255]
+        self.image = Image.fromarray(rgba, "RGBA")
+        self.image.thumbnail((PSR_MAX_PX, PSR_MAX_PX), Image.LANCZOS)
+        self.shadowed_fraction = float(mask.mean())
+    def render(self, raster, size):
+        """RGBA picture of `size` matching `raster`'s extent, with the shadow tint in place."""
+        W, H = raster.width * raster.dx, raster.height * raster.dy
+        fx0, fx1 = (self.x0 - raster.x0) / W, (self.x1 - raster.x0) / W
+        fy0, fy1 = (raster.y0 - self.y0) / H, (raster.y0 - self.y1) / H
+        w, h = max(1, round((fx1 - fx0) * size[0])), max(1, round((fy1 - fy0) * size[1]))
+        layer = Image.new("RGBA", size, (0, 0, 0, 0))
+        if w * h > 50_000_000:                                   # extent far larger than the map: skip
+            return layer
+        piece = resize_rgba(self.image, (w, h))
+        piece.putalpha(piece.getchannel("A").point(lambda a: int(a * PSR_OPACITY)))
+        layer.paste(piece, (round(fx0 * size[0]), round(fy0 * size[1])))
+        return layer
 @dataclass
 class Region:
     stem: str                                   # file stem, e.g. "Haworth"
@@ -427,6 +474,7 @@ class PlannerApp(tk.Tk):
         self.mini_photo = None
         self.gnb_defaults = load_gnb_defaults()
         self._topo_cache = {}           # view key (region stem or None) -> (overlay image or None, path)
+        self._psr_cache = {}            # view key -> PsrLayer or None
         self._bg_key = self._bg_img = None   # cached map background (map + overlay)
         self.points = {"gNB": None, "UE": None}      # (fx, fy) fractions of the region picture
         self.template_dir = ""
@@ -501,6 +549,9 @@ class PlannerApp(tk.Tk):
         self.topo_opacity = tk.DoubleVar(value=TOPO_OPACITY)
         ttk.Checkbutton(row, text="Topographic overlay", variable=self.show_topo,
                         command=self.on_topo_toggle).pack(side="left")
+        self.show_psr = tk.BooleanVar(value=False)
+        ttk.Checkbutton(panel, text="Permanently shadowed regions", variable=self.show_psr,
+                        command=self.on_psr_toggle).pack(anchor="w", pady=(0, 4))
 
         ttk.Button(panel, text="Set OAI CONF template folder (optional)",
                    command=self.choose_template_dir).pack(fill="x")
@@ -621,8 +672,34 @@ class PlannerApp(tk.Tk):
         return ""
 
     def _append_topo_note(self):
-        if self.show_topo.get() and self._topo_note():
-            self.status.set(self.status.get() + "  " + self._topo_note())
+        notes = [self._topo_note() if self.show_topo.get() else "", self._psr_note() if self.show_psr.get() else ""]
+        notes = [n for n in notes if n]
+        if notes:
+            self.status.set(self.status.get() + "  " + "  ".join(notes))
+
+    def _current_psr(self):
+        """The shadowed-region layer for the map on screen (None if there is no file)."""
+        key = self.region.stem if self.mode == "region" and self.region else None
+        if key not in self._psr_cache:
+            path = POLE_PSR if key is None else os.path.join(REGION_DIR, f"{key}__psr.tif")
+            self.status.set("Loading shadowed regions...")
+            self.update_idletasks()
+            try:
+                layer = PsrLayer(path) if os.path.exists(path) else None
+            except (OSError, ValueError):
+                layer = None
+            self._psr_cache[key] = layer
+        return self._psr_cache[key]
+
+    def _psr_note(self):
+        if self.raster is None:
+            return ""
+        return "" if self._current_psr() else "No permanently shadowed region file (*_psr.tif) found for this view."
+
+    def on_psr_toggle(self):
+        if self.show_psr.get():
+            self.status.set(self._psr_note() or "Permanently shadowed regions shown.")
+        self.redraw()
 
     def on_topo_toggle(self):
         if self.show_topo.get():
@@ -632,10 +709,14 @@ class PlannerApp(tk.Tk):
     def _background(self, size):
         """The map picture at `size`, with the overlay composited on top when it is switched on."""
         overlay = self._current_overlay() if self.show_topo.get() else None
+        psr = self._current_psr() if self.show_psr.get() else None
+
         opacity = round(self.topo_opacity.get(), 2)
-        key = (id(self.raster), size, id(overlay), opacity)
+        key = (id(self.raster), size, id(overlay), id(psr), opacity)
         if key != self._bg_key:
             base = self.raster.display.resize(size)
+            if psr is not None:                                  # shadow tint sits under the topo lines
+                base = Image.alpha_composite(base.convert("RGBA"), psr.render(self.raster, size))
             if overlay is not None:
                 base = base.convert("RGBA")
                 top = resize_rgba(overlay, size)
