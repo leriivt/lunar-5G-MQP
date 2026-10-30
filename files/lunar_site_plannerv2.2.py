@@ -79,7 +79,7 @@ THEME = {
     "footprint": "#00e5ff",          # box showing the open region's extent on the atlas
     "gnb": "#c62828", "ue": "#1565c0",                  # gNB / UE markers and panel headings
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
-    "grid": "#81eb88", "grid_label": "#b2ebf2",
+    "grid": "#ffffff", "grid_label": "#b2ebf2", #81eb88
 }
 
 
