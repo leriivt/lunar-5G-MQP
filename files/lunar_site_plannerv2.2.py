@@ -15,6 +15,7 @@ import csv
 import math
 import os
 import re
+import struct
 import sys
 import tkinter as tk
 from dataclasses import dataclass, field
@@ -383,6 +384,7 @@ class PlannerApp(tk.Tk):
         self.regions, self.missing, self.candidates = regions, missing, candidates
         self.rasters = {}               # cache: path -> Raster
         self.mode = "atlas"             # "atlas" or "region"
+        self.view_mode = "atlas"        # "atlas" or "cross"
         self.region = None
         self.raster = None
         self.pole = None                # the atlas raster (kept while a region is open)
@@ -415,6 +417,14 @@ class PlannerApp(tk.Tk):
         box.pack(fill="x")
         box.bind("<<ComboboxSelected>>", lambda e: self.on_choice())
         ttk.Button(panel, text="< Back to atlas", command=self.show_atlas).pack(fill="x", pady=(4, 8))
+
+        view_frame = ttk.Frame(panel)
+        view_frame.pack(fill="x", pady=(0, 8))
+        self.view_choice = tk.StringVar(value="atlas")
+        ttk.Radiobutton(view_frame, text="Atlas view", value="atlas", variable=self.view_choice,
+                        command=self.set_view).pack(side="left", expand=True)
+        ttk.Radiobutton(view_frame, text="Cross section", value="cross", variable=self.view_choice,
+                        command=self.set_view).pack(side="left", expand=True)
 
         # one group per node: pick it, then click the map OR type its coordinates
         self.active = tk.StringVar(value="gNB")
@@ -483,6 +493,9 @@ class PlannerApp(tk.Tk):
 
     def show_atlas(self):
         self.mode, self.region = "atlas", None
+        self.view_mode = "atlas"
+        if hasattr(self, "view_choice"):
+            self.view_choice.set("atlas")
         self.choice.set(ATLAS_LABEL)
         self.points = {"gNB": None, "UE": None}
         try:
@@ -503,6 +516,9 @@ class PlannerApp(tk.Tk):
             messagebox.showerror("Region map", f"Cannot read {region.dem_path}\n{err}")
             return
         self.mode, self.region, self.raster, self.focus = "region", region, raster, region
+        self.view_mode = "atlas"
+        if hasattr(self, "view_choice"):
+            self.view_choice.set("atlas")
         self.choice.set(region.label)
         self.points = {"gNB": None, "UE": None}
         note = self._apply_gnb_default(stem, raster)
@@ -543,6 +559,9 @@ class PlannerApp(tk.Tk):
         ox, oy = (cw - iw * scale) / 2, (ch - ih * scale) / 2
         self._view = (scale, ox, oy, iw, ih)
         shown = self.raster.display.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
+        if self.mode == "region" and self.view_mode == "cross":
+            self.cross_section_view()
+            return
         self.photo = ImageTk.PhotoImage(shown)
         c.create_image(ox, oy, anchor="nw", image=self.photo)
         if self.mode == "atlas":
@@ -627,7 +646,7 @@ class PlannerApp(tk.Tk):
         return (event.x - ox) / (iw * scale), (event.y - oy) / (ih * scale)
 
     def on_press(self, event):
-        if self.raster is None:
+        if self.raster is None or self.view_mode == "cross":
             return
         if self.mode == "atlas":
             hits = [(math.hypot(event.x - x, event.y - y), t) for x, y, t in self._hits]
@@ -641,7 +660,7 @@ class PlannerApp(tk.Tk):
             self.place(event)
 
     def on_drag(self, event):
-        if self.mode == "region":
+        if self.mode == "region" and self.view_mode != "cross":
             self.place(event)
 
     def place(self, event):
@@ -773,6 +792,146 @@ class PlannerApp(tk.Tk):
             f"Optimal gNB for {self.region.label}: mast {best['cand_id']} "
             f"({lon:.5f}, {lat:.5f}), {float(best[coverage_col]):.1f} km² "
             f"coverage @ {OPTIMAL_GNB_FREQ_GHZ:g} GHz.")
+
+
+    def set_view(self):
+        """Switch between the terrain atlas and the gNB-to-UE cross section."""
+        choice = self.view_choice.get()
+        if choice == "cross":
+            if self.mode != "region":
+                messagebox.showinfo("Open a region", "Open a region before showing a cross section.")
+                self.view_choice.set("atlas")
+                return
+            if not all(self.points.values()):
+                messagebox.showwarning("Markers required", "Place both the gNB and the UE before showing a cross section.")
+                self.view_choice.set("atlas")
+                return
+            self.view_mode = "cross"
+        else:
+            self.view_mode = "atlas"
+        self.redraw()
+
+    def cross_section_view(self):
+        """Draw the terrain and antenna heights between the placed gNB and UE."""
+        c = self.canvas
+        c.delete("all")
+        if self.mode != "region":
+            self._label(c, 20, 20, "Open a region to view a cross section.", THEME["label_fg"], "nw")
+            return
+        if not all(self.points.values()):
+            self._label(c, 20, 20, "Place both the gNB and the UE to view a cross section.",
+                        THEME["label_fg"], "nw")
+            return
+
+        bdem = find_bdem(self.region.stem)
+        if not os.path.exists(bdem):
+            self._label(c, 20, 20, f".bdem file not found: {bdem}", THEME["label_fg"], "nw")
+            self.status.set("Cross section unavailable: no .bdem terrain file found.")
+            return
+        try:
+            with open(bdem, "rb") as f:
+                header = f.read(struct.calcsize("<4sii4d"))
+                if len(header) != struct.calcsize("<4sii4d"):
+                    raise ValueError("truncated header")
+                magic, n_lon, n_lat, min_lon, max_lon, min_lat, max_lat = struct.unpack("<4sii4d", header)
+                if magic != b"BDEM" or n_lon <= 1 or n_lat <= 1:
+                    raise ValueError("invalid BDEM header")
+                elevations = np.fromfile(f, dtype="<f4", count=n_lon * n_lat)
+            if elevations.size != n_lon * n_lat:
+                raise ValueError("truncated elevation data")
+            elevations = elevations.reshape((n_lat, n_lon))
+        except (OSError, ValueError, struct.error) as err:
+            self._label(c, 20, 20, f"Cannot read .bdem: {err}", THEME["label_fg"], "nw")
+            return
+
+        gnb_lonlat = self.lonlat("gNB")
+        ue_lonlat = self.lonlat("UE")
+        if gnb_lonlat == ue_lonlat:
+            self._label(c, 20, 20, "gNB and UE cannot be at the same position.", THEME["label_fg"], "nw")
+            return
+
+        samples = 160
+        lon_delta = (ue_lonlat[0] - gnb_lonlat[0] + 180.0) % 360.0 - 180.0
+        lons = gnb_lonlat[0] + lon_delta * np.linspace(0.0, 1.0, samples)
+        lats = gnb_lonlat[1] + (ue_lonlat[1] - gnb_lonlat[1]) * np.linspace(0.0, 1.0, samples)
+        distances = np.array([distance_m(gnb_lonlat, (float(lon), float(lat))) for lon, lat in zip(lons, lats)])
+
+        terrain = np.empty(samples, dtype=np.float32)
+        for i, (lon, lat) in enumerate(zip(lons, lats)):
+            lon -= 360.0 * round((lon - (min_lon + max_lon) / 2.0) / 360.0)
+            if lon < min_lon or lon > max_lon or lat < min_lat or lat > max_lat:
+                terrain[i] = np.nan
+                continue
+            fx = (lon - min_lon) / (max_lon - min_lon) * (n_lon - 1)
+            fy = (lat - min_lat) / (max_lat - min_lat) * (n_lat - 1)
+            x0, y0 = min(int(fx), n_lon - 2), min(int(fy), n_lat - 2)
+            tx, ty = fx - x0, fy - y0
+            terrain[i] = ((1 - tx) * (1 - ty) * elevations[y0, x0]
+                          + tx * (1 - ty) * elevations[y0, x0 + 1]
+                          + (1 - tx) * ty * elevations[y0 + 1, x0]
+                          + tx * ty * elevations[y0 + 1, x0 + 1])
+
+        valid = np.isfinite(terrain)
+        if not valid.any():
+            self._label(c, 20, 20, "The gNB-to-UE line is outside the .bdem grid.", THEME["label_fg"], "nw")
+            return
+        d_valid = distances[valid]
+        z_valid = terrain[valid]
+
+        try:
+            gnb_h = float(self.height_vars["gNB"].get())
+            ue_h = float(self.height_vars["UE"].get())
+        except ValueError:
+            self._label(c, 20, 20, "Antenna heights must be numbers.", THEME["label_fg"], "nw")
+            return
+
+        cw, ch = c.winfo_width(), c.winfo_height()
+        left, right, top, bottom = 75, max(85, cw - 30), 35, max(70, ch - 55)
+        if right <= left or bottom <= top:
+            return
+        xmin, xmax = 0.0, max(float(distances[-1]), 1.0)
+        endpoints = np.array([float(z_valid[0]), float(z_valid[-1]), gnb_h + float(z_valid[0]),
+                              ue_h + float(z_valid[-1])])
+        zmin, zmax = float(np.min(endpoints)), float(np.max(endpoints))
+        zspan = max(zmax - zmin, 1.0)
+        zmin -= zspan * 0.12
+        zmax += zspan * 0.12
+        def px(d): return left + (d - xmin) / (xmax - xmin) * (right - left)
+        def py(z): return bottom - (z - zmin) / (zmax - zmin) * (bottom - top)
+
+        c.create_text((left + right) // 2, 16, text=f"Cross section: {self.region.label}",
+                      fill=THEME["label_fg"], font=(self.font_family, self.font_size + 2, "bold"))
+        c.create_line(left, bottom, right, bottom, fill="#9e9e9e")
+        c.create_line(left, top, left, bottom, fill="#9e9e9e")
+
+        xs, ys = [px(float(d)) for d in d_valid], [py(float(z)) for z in z_valid]
+        c.create_polygon([left, bottom] + sum(([x, y] for x, y in zip(xs, ys)), []) + [right, bottom],
+                         fill="#5d4037", outline="")
+        for i in range(len(xs) - 1):
+            c.create_line(xs[i], ys[i], xs[i + 1], ys[i + 1], fill="#d7ccc8", width=2)
+
+        for who, lonlat, color in (("gNB", gnb_lonlat, THEME["gnb"]), ("UE", ue_lonlat, THEME["ue"])):
+            at_start = who == "gNB"
+            d = 0.0 if at_start else xmax
+            z_ground = float(z_valid[0] if at_start else z_valid[-1])
+            z_height = gnb_h if at_start else ue_h
+            x, z_ground_y = px(d), py(z_ground)
+            z_top_y = py(z_ground + z_height)
+            c.create_line(x, z_ground_y, x, z_top_y, fill=color, width=3)
+            c.create_oval(x - 5, z_top_y - 5, x + 5, z_top_y + 5, fill=color, outline="#ffffff")
+            self._label(c, x + (8 if at_start else -8), z_top_y - 8,
+                        f"{who} {z_height:g} m", THEME["label_fg"], "sw" if at_start else "se")
+
+        for frac in range(5):
+            d = xmax * frac / 4
+            c.create_text(px(d), bottom + 18, text=f"{d / 1000:.2f} km", fill=THEME["label_fg"])
+        c.create_text((left + right) // 2, ch - 12, text="Distance", fill=THEME["label_fg"])
+        c.create_text(18, (top + bottom) // 2, text="Elevation (m)", fill=THEME["label_fg"], angle=90)
+        for frac in range(5):
+            z = zmin + (zmax - zmin) * frac / 4
+            c.create_text(left - 8, py(z), text=f"{z:.0f}", anchor="e", fill=THEME["label_fg"])
+        separation = distance_m(gnb_lonlat, ue_lonlat)
+        self.status.set(f"Cross section: {separation:.0f} m separation; terrain from {bdem}")
 
     # ---- export --------------------------------------------------------------
     def choose_template_dir(self):
