@@ -844,6 +844,8 @@ class PlannerApp(tk.Tk):
             self._label(c, 20, 20, f"Cannot read .bdem: {err}", THEME["label_fg"], "nw")
             return
 
+        print( max_lat, max_lon, min_lat, min_lon)
+
         gnb_lonlat = self.lonlat("gNB")
         ue_lonlat = self.lonlat("UE")
         if gnb_lonlat == ue_lonlat:
@@ -884,20 +886,25 @@ class PlannerApp(tk.Tk):
         except ValueError:
             self._label(c, 20, 20, "Antenna heights must be numbers.", THEME["label_fg"], "nw")
             return
+        if not np.isfinite(gnb_h) or not np.isfinite(ue_h):
+            self._label(c, 20, 20, "Antenna heights must be finite numbers.", THEME["label_fg"], "nw")
+            return
 
         cw, ch = c.winfo_width(), c.winfo_height()
         left, right, top, bottom = 75, max(85, cw - 30), 35, max(70, ch - 55)
         if right <= left or bottom <= top:
             return
         xmin, xmax = 0.0, max(float(distances[-1]), 1.0)
-        endpoints = np.array([float(z_valid[0]), float(z_valid[-1]), gnb_h + float(z_valid[0]),
-                              ue_h + float(z_valid[-1])])
-        zmin, zmax = float(np.min(endpoints)), float(np.max(endpoints))
+        values = np.concatenate((
+            z_valid.astype(float),
+            np.array([gnb_h + float(z_valid[0]), ue_h + float(z_valid[-1])], dtype=float),
+        ))
+        zmin, zmax = float(np.min(values)), float(np.max(values))
         zspan = max(zmax - zmin, 1.0)
         zmin -= zspan * 0.12
         zmax += zspan * 0.12
-        def px(d): return left + (d - xmin) / (xmax - xmin) * (right - left)
-        def py(z): return bottom - (z - zmin) / (zmax - zmin) * (bottom - top)
+        def px(d): return min(right, max(left, left + (d - xmin) / (xmax - xmin) * (right - left)))
+        def py(z): return min(bottom, max(top, bottom - (z - zmin) / (zmax - zmin) * (bottom - top)))
 
         c.create_text((left + right) // 2, 16, text=f"Cross section: {self.region.label}",
                       fill=THEME["label_fg"], font=(self.font_family, self.font_size + 2, "bold"))
@@ -906,7 +913,7 @@ class PlannerApp(tk.Tk):
 
         xs, ys = [px(float(d)) for d in d_valid], [py(float(z)) for z in z_valid]
         c.create_polygon([left, bottom] + sum(([x, y] for x, y in zip(xs, ys)), []) + [right, bottom],
-                         fill="#5d4037", outline="")
+                         fill="#808080", outline="")
         for i in range(len(xs) - 1):
             c.create_line(xs[i], ys[i], xs[i + 1], ys[i + 1], fill="#d7ccc8", width=2)
 
