@@ -93,7 +93,8 @@ THEME = {
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
     "grid": "#000000", "grid_label": "#b2ebf2", #81eb88
     "psr": "#29b6f6",                # tint for permanently shadowed regions
-    "link": "#ffeb3b",               # line between the gNB and the UE (map and cross section)
+    "link": "#ffeb3b",               # gNB-UE line when line of sight cannot be judged
+    "los_clear": "#00e676", "los_blocked": "#ff5252",   # gNB-UE line: line of sight clear / blocked
     "terrain_fill": "#808080", "terrain_line": "#d7ccc8",   # cross-section terrain
 }
 
@@ -271,6 +272,18 @@ def scale_bar(m_per_px, target_px=110):
     base = 10 ** math.floor(math.log10(raw))
     length = max(k for k in (1, 2, 5, 10) if k * base <= raw) * base
     return length / m_per_px, (f"{length:g} m" if length < 1000 else f"{length / 1000:g} km")
+
+
+def chord_height(dist, z_a, h_a, z_b, h_b):
+    """Height (m, above the reference sphere) of the straight 3-D line between two antennas at
+    each ground distance in `dist`. z = ground elevation, h = antenna height. Includes the
+    curvature of the Moon, so long links dip below the horizon as they should."""
+    R = BODY_RADIUS_M
+    theta = dist[-1] / R
+    ra, rb = R + z_a + h_a, R + z_b + h_b
+    e0, e1 = rb * math.sin(theta), rb * math.cos(theta) - ra          # B - A, with A = (0, ra)
+    phi = np.asarray(dist, dtype=float) / R
+    return (-ra * e0) / (np.sin(phi) * e1 - np.cos(phi) * e0) - R
 
 
 # ----------------------------------------------------------------------------
@@ -533,7 +546,8 @@ class PlannerApp(tk.Tk):
         self.regions, self.missing, self.candidates = regions, missing, candidates
         self.rasters = {}               # cache: path -> Raster
         self.mode = "atlas"             # "atlas" or "region"
-        self.view_mode = "atlas"        # "atlas" or "cross"
+        self._link = None               # gNB-UE terrain profile and line-of-sight result
+        self._inset_rect = None         # screen rectangle of the cross-section inset
         self.region = None
         self.raster = None
         self.pole = None                # the atlas raster (kept while a region is open)
@@ -570,13 +584,9 @@ class PlannerApp(tk.Tk):
         box.bind("<<ComboboxSelected>>", lambda e: self.on_choice())
         ttk.Button(panel, text="< Back to atlas", command=self.show_atlas).pack(fill="x", pady=(4, 8))
 
-        view_frame = ttk.Frame(panel)
-        view_frame.pack(fill="x", pady=(0, 8))
-        self.view_choice = tk.StringVar(value="atlas")
-        ttk.Radiobutton(view_frame, text="Atlas view", value="atlas", variable=self.view_choice,
-                        command=self.set_view).pack(side="left", expand=True)
-        ttk.Radiobutton(view_frame, text="Cross section", value="cross", variable=self.view_choice,
-                        command=self.set_view).pack(side="left", expand=True)
+        self.show_inset = tk.BooleanVar(value=True)
+        ttk.Checkbutton(panel, text="Cross-section inset", variable=self.show_inset,
+                        command=self.redraw).pack(anchor="w", pady=(0, 8))
 
         # one group per node: pick it, then click the map OR type its coordinates
         self.active = tk.StringVar(value="gNB")
@@ -658,9 +668,6 @@ class PlannerApp(tk.Tk):
 
     def show_atlas(self):
         self.mode, self.region = "atlas", None
-        self.view_mode = "atlas"
-        if hasattr(self, "view_choice"):
-            self.view_choice.set("atlas")
         self.choice.set(ATLAS_LABEL)
         self.points = {"gNB": None, "UE": None}
         try:
@@ -682,9 +689,6 @@ class PlannerApp(tk.Tk):
             messagebox.showerror("Region map", f"Cannot read {region.dem_path}\n{err}")
             return
         self.mode, self.region, self.raster, self.focus = "region", region, raster, region
-        self.view_mode = "atlas"
-        if hasattr(self, "view_choice"):
-            self.view_choice.set("atlas")
         self.choice.set(region.label)
         self.points = {"gNB": None, "UE": None}
         note = self._apply_gnb_default(stem, raster)
@@ -726,9 +730,10 @@ class PlannerApp(tk.Tk):
         ox, oy = (cw - iw * scale) / 2, (ch - ih * scale) / 2
         self._view = (scale, ox, oy, iw, ih)
         size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
-        if self.mode == "region" and self.view_mode == "cross":
-            self.cross_section_view()
-            return
+        self._inset_rect = None
+        self._link = self._compute_link()
+        if self._link:
+            self.sep_var.set(f"Separation: {self._link_text(self._link)}")
         self.photo = ImageTk.PhotoImage(self._background(size))
         c.create_image(ox, oy, anchor="nw", image=self.photo)
         if self.show_grid.get():
@@ -738,6 +743,7 @@ class PlannerApp(tk.Tk):
         else:
             self._draw_region_overlays()
         self._draw_legend(*self._map_legend())
+        self._draw_profile_inset()
 
     # ---- topographic overlay -------------------------------------------------
     def _current_overlay(self):
@@ -817,6 +823,114 @@ class PlannerApp(tk.Tk):
             self._bg_img, self._bg_key = base, key
         return self._bg_img
 
+    # ---- gNB-UE link: line of sight and cross-section inset -------------------
+    def _compute_link(self):
+        """Terrain profile and line-of-sight check between the placed gNB and UE, or None."""
+        if self.mode != "region" or not all(self.points.values()):
+            return None
+        g, u = self.lonlat("gNB"), self.lonlat("UE")
+        link = {"sep": distance_m(g, u), "status": "unknown", "message": ""}
+        if g == u:
+            link["message"] = "gNB and UE are at the same position."
+            return link
+        try:
+            gnb_h, ue_h = float(self.height_vars["gNB"].get()), float(self.height_vars["UE"].get())
+        except ValueError:
+            gnb_h = ue_h = float("nan")
+        dist, terrain = elevation_profile(self.raster, self.points["gNB"], self.points["UE"])
+        link.update(dist=dist, terrain=terrain, gnb_h=gnb_h, ue_h=ue_h)
+        if not (np.isfinite(gnb_h) and np.isfinite(ue_h)):
+            link["message"] = "Antenna heights must be numbers."
+        elif not (np.isfinite(terrain[0]) and np.isfinite(terrain[-1])):
+            link["message"] = "The DEM has no elevation data at the gNB or the UE."
+        else:
+            chord = chord_height(dist, float(terrain[0]), gnb_h, float(terrain[-1]), ue_h)
+            clearance = float(np.nanmin(chord - terrain))      # NaN (no-data) samples are ignored
+            link.update(chord=chord, clearance=clearance, status="clear" if clearance >= 0 else "blocked")
+        return link
+
+    def _link_colour(self, link):
+        key = {"clear": "los_clear", "blocked": "los_blocked"}.get(link["status"] if link else None, "link")
+        return THEME[key]
+
+    def _link_text(self, link):
+        d = link["sep"]
+        text = f"{d:.0f} m" if d < 1000 else f"{d / 1000:.2f} km"
+        return text + {"clear": " LOS", "blocked": " NLOS"}.get(link["status"], "")
+
+    def _in_inset(self, event):
+        r = self._inset_rect
+        return bool(r and r[0] <= event.x <= r[2] and r[1] <= event.y <= r[3])
+
+    def _draw_profile_inset(self):
+        """Mini cross section of the gNB-UE line in the top-right corner of the map."""
+        link = self._link
+        if link is None or not self.show_inset.get():
+            return
+        c, t = self.canvas, THEME
+        cw = c.winfo_width()
+        w, h = min(440, int(cw * 0.45)), 235
+        if w < 240:
+            return
+        x1, y0 = cw - 12, 12
+        x0, y1 = x1 - w, y0 + h
+        self._inset_rect = (x0, y0, x1, y1)
+        small = max(self.font_size - 1, 7)
+        colour = self._link_colour(link)
+        c.create_rectangle(x0, y0, x1, y1, fill=t["label_bg"], outline=t["border"], width=2)
+        c.create_text(x0 + 8, y0 + 7, text="Cross section", anchor="nw", fill=t["label_focus_fg"],
+                      font=(self.font_family, self.font_size, "bold"))
+        if link["message"]:
+            c.create_text(x0 + 8, y0 + 30, text=link["message"], anchor="nw", fill=t["label_fg"],
+                          font=(self.font_family, small), width=w - 16)
+            return
+        status = ({"clear": f"LOS clear, {link['clearance']:.0f} m margin",
+                   "blocked": f"NLOS: terrain blocks the line by {-link['clearance']:.0f} m"}[link["status"]])
+        c.create_text(x0 + 8, y0 + 26, text=status, anchor="nw", fill=colour,
+                      font=(self.font_family, small, "bold"))
+
+        dist, terrain, chord = link["dist"], link["terrain"], link["chord"]
+        left, right, top, bottom = x0 + 46, x1 - 14, y0 + 50, y1 - 40
+        xmax = max(float(dist[-1]), 1.0)
+        valid = np.isfinite(terrain)
+        values = np.concatenate((terrain[valid].astype(float), chord))
+        zmin, zmax = float(values.min()), float(values.max())
+        pad = max(zmax - zmin, 1.0) * 0.12
+        zmin, zmax = zmin - pad, zmax + pad
+        px = lambda d: left + d / xmax * (right - left)
+        py = lambda z: bottom - (z - zmin) / (zmax - zmin) * (bottom - top)
+
+        c.create_line(left, bottom, right, bottom, fill="#9e9e9e")
+        c.create_line(left, top, left, bottom, fill="#9e9e9e")
+        idx = np.flatnonzero(valid)                                  # each run of valid DEM data on its own
+        for run in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1):
+            if len(run) < 2:
+                continue
+            pts = [v for i in run for v in (px(float(dist[i])), py(float(terrain[i])))]
+            c.create_polygon([pts[0], bottom] + pts + [pts[-2], bottom], fill=t["terrain_fill"], outline="")
+            c.create_line(*pts, fill=t["terrain_line"], width=2)
+        line = [v for d, z in zip(dist, chord) for v in (px(float(d)), py(float(z)))]
+        c.create_line(*line, fill=colour, width=2, dash=(6, 3))        # the 3-D line, curvature included
+        for who, i, height, color in (("gNB", 0, link["gnb_h"], t["gnb"]), ("UE", -1, link["ue_h"], t["ue"])):
+            x, y_top = px(float(dist[i])), py(float(chord[i]))
+            c.create_line(x, py(float(terrain[i])), x, y_top, fill=color, width=3)
+            c.create_oval(x - 4, y_top - 4, x + 4, y_top + 4, fill=color, outline="#ffffff")
+            self._label(c, x + (6 if who == "gNB" else -6), y_top - 5, f"{height:g} m", t["label_fg"],
+                        "sw" if who == "gNB" else "se", size=small)
+        m = len(dist) // 2
+        self._label(c, px(float(dist[m])), py(float(chord[m])) - 8, self._link_text(link), t["label_fg"], "s",
+                    size=small, bold=True)
+        for frac in (0.0, 0.5, 1.0):                                  # distance axis
+            d = xmax * frac
+            c.create_text(px(d), bottom + 4, text=f"{d:.0f} m" if xmax < 1000 else f"{d / 1000:.2f} km",
+                          anchor="n", fill=t["label_fg"], font=(self.font_family, small))
+        for z in (zmin + pad, zmax - pad):                            # elevation axis (data min / max)
+            c.create_text(left - 4, py(z), text=f"{z:.0f}", anchor="e", fill=t["label_fg"],
+                          font=(self.font_family, small))
+        exaggeration = (xmax / (right - left)) / ((zmax - zmin) / (bottom - top))
+        c.create_text(x0 + 8, y1 - 6, text=f"elevation in m, vertical exaggeration x{exaggeration:.1f}",
+                      anchor="sw", fill=t["label_fg"], font=(self.font_family, small))
+
     # ---- legend ---------------------------------------------------------------
     def _map_legend(self):
         """(items, scale bar) describing what is on the map right now."""
@@ -829,7 +943,8 @@ class PlannerApp(tk.Tk):
                 items.append(("box", t["footprint"], "Last opened region"))
         else:
             items = [("dot", t["gnb"], "gNB"), ("dot", t["ue"], "UE"),
-                     ("dash", t["link"], "Line between gNB and UE")]
+                     ("dash", t["los_clear"], "Line of sight (LOS) clear"),
+                     ("dash", t["los_blocked"], "Line of sight blocked (NLOS)")]
             if self.show_cands.get():
                 items += [("dot", t["cand_ridge"], "Candidate mast (ridge)"),
                           ("dot", t["cand_landing"], "Candidate mast (landing site)")]
@@ -943,15 +1058,22 @@ class PlannerApp(tk.Tk):
                     cx, cy = self._canvas_xy(fx, fy)
                     c.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, fill=colors.get(cls, "#ffffff"), outline="#000000")
         size = (c.winfo_width(), c.winfo_height())
+        mid = None
         if all(self.points.values()):                        # line between gNB and UE, follows the markers
             (x1, y1), (x2, y2) = self._canvas_xy(*self.points["gNB"]), self._canvas_xy(*self.points["UE"])
-            c.create_line(x1, y1, x2, y2, fill=t["link"], width=2, dash=(6, 4))
+            c.create_line(x1, y1, x2, y2, fill=self._link_colour(self._link), width=3, dash=(6, 4))
+            mid = ((x1 + x2) / 2, (y1 + y2) / 2)
         for who, pt in self.points.items():
             if pt:
                 cx, cy = self._canvas_xy(*pt)
                 c.create_oval(cx - 8, cy - 8, cx + 8, cy + 8, fill=t["gnb" if who == "gNB" else "ue"],
                               outline=t["marker_outline"], width=2)
-                self._label(c, cx + 11, cy - 11, who, t["label_fg"], "sw", bold=True, clamp=size)
+                lon, lat = self.lonlat(who)
+                self._label(c, cx + 11, cy - 11, f"({lon:.5f}, {lat:.5f})", t["label_fg"], "sw",
+                            bold=True, clamp=size)
+        if mid and self._link:                               # separation written on the line itself
+            self._label(c, mid[0], mid[1], self._link_text(self._link), t["label_fg"], "center",
+                        bold=True, clamp=size)
 
     def _draw_grid(self):
         r, c, t = self.raster, self.canvas, THEME
@@ -1007,7 +1129,7 @@ class PlannerApp(tk.Tk):
         return (event.x - ox) / (iw * scale), (event.y - oy) / (ih * scale)
 
     def on_press(self, event):
-        if self.raster is None or self.view_mode == "cross":
+        if self.raster is None or self._in_inset(event):
             return
         if self.mode == "atlas":
             hits = [(math.hypot(event.x - x, event.y - y), t) for x, y, t in self._hits]
@@ -1021,7 +1143,7 @@ class PlannerApp(tk.Tk):
             self.place(event)
 
     def on_drag(self, event):
-        if self.mode == "region" and self.view_mode != "cross":
+        if self.mode == "region" and not self._in_inset(event):
             self.place(event)
 
     def place(self, event):
@@ -1154,111 +1276,6 @@ class PlannerApp(tk.Tk):
             f"({lon:.5f}, {lat:.5f}), {float(best[coverage_col]):.1f} km² "
             f"coverage @ {OPTIMAL_GNB_FREQ_GHZ:g} GHz.")
 
-
-    def set_view(self):
-        """Switch between the terrain atlas and the gNB-to-UE cross section."""
-        choice = self.view_choice.get()
-        if choice == "cross":
-            if self.mode != "region":
-                messagebox.showinfo("Open a region", "Open a region before showing a cross section.")
-                self.view_choice.set("atlas")
-                return
-            if not all(self.points.values()):
-                messagebox.showwarning("Markers required", "Place both the gNB and the UE before showing a cross section.")
-                self.view_choice.set("atlas")
-                return
-            self.view_mode = "cross"
-        else:
-            self.view_mode = "atlas"
-        self.redraw()
-
-    def cross_section_view(self):
-        """Draw the DEM terrain and the antenna heights along the line between the gNB and the UE."""
-        c, t = self.canvas, THEME
-        c.delete("all")
-
-        def message(text):
-            self._label(c, 20, 20, text, t["label_fg"], "nw")
-
-        if self.mode != "region":
-            return message("Open a region to view a cross section.")
-        if not all(self.points.values()):
-            return message("Place both the gNB and the UE to view a cross section.")
-        try:
-            gnb_h, ue_h = float(self.height_vars["gNB"].get()), float(self.height_vars["UE"].get())
-        except ValueError:
-            return message("Antenna heights must be numbers.")
-        if not (np.isfinite(gnb_h) and np.isfinite(ue_h)):
-            return message("Antenna heights must be finite numbers.")
-        gnb_ll, ue_ll = self.lonlat("gNB"), self.lonlat("UE")
-        if gnb_ll == ue_ll:
-            return message("gNB and UE cannot be at the same position.")
-
-        dist, terrain = elevation_profile(self.raster, self.points["gNB"], self.points["UE"])
-        valid = np.isfinite(terrain)
-        if not (valid[0] and valid[-1]):
-            return message("The DEM has no elevation data at the gNB or the UE position.")
-        z_gnb, z_ue = float(terrain[0]), float(terrain[-1])
-
-        cw, ch = c.winfo_width(), c.winfo_height()
-        left, right, top, bottom = 75, max(85, cw - 260), 35, max(70, ch - 55)   # right column holds the legend
-        if right <= left or bottom <= top:
-            return
-        xmax = max(float(dist[-1]), 1.0)
-        values = np.concatenate((terrain[valid].astype(float), [z_gnb + gnb_h, z_ue + ue_h]))
-        zmin, zmax = float(values.min()), float(values.max())
-        zspan = max(zmax - zmin, 1.0)
-        zmin, zmax = zmin - zspan * 0.12, zmax + zspan * 0.12
-        def px(d): return left + d / xmax * (right - left)
-        def py(z): return bottom - (z - zmin) / (zmax - zmin) * (bottom - top)
-
-        c.create_text((left + right) // 2, 16, text=f"Cross section: {self.region.label}",
-                      fill=t["label_fg"], font=(self.font_family, self.font_size + 2, "bold"))
-        c.create_line(left, bottom, right, bottom, fill="#9e9e9e")
-        c.create_line(left, top, left, bottom, fill="#9e9e9e")
-
-        idx = np.flatnonzero(valid)                                  # draw each run of valid data on its own
-        for run in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1):
-            if len(run) < 2:
-                continue
-            pts = [v for i in run for v in (px(float(dist[i])), py(float(terrain[i])))]
-            c.create_polygon([pts[0], bottom] + pts + [pts[-2], bottom], fill=t["terrain_fill"], outline="")
-            c.create_line(*pts, fill=t["terrain_line"], width=2)
-
-        tops = {}
-        for who, d, z_ground, height, color in (("gNB", 0.0, z_gnb, gnb_h, t["gnb"]),
-                                                 ("UE", xmax, z_ue, ue_h, t["ue"])):
-            tops[who] = (px(d), py(z_ground + height))
-        c.create_line(*tops["gNB"], *tops["UE"], fill=t["link"], width=2, dash=(6, 4))   # gNB-UE line
-        for who, d, z_ground, height, color in (("gNB", 0.0, z_gnb, gnb_h, t["gnb"]),
-                                                 ("UE", xmax, z_ue, ue_h, t["ue"])):
-            x, y_top = tops[who]
-            c.create_line(x, py(z_ground), x, y_top, fill=color, width=3)
-            c.create_oval(x - 5, y_top - 5, x + 5, y_top + 5, fill=color, outline="#ffffff")
-            at_start = who == "gNB"
-            self._label(c, x + (8 if at_start else -8), y_top - 8, f"{who} {height:g} m",
-                        t["label_fg"], "sw" if at_start else "se")
-
-        for frac in range(5):
-            d = xmax * frac / 4
-            c.create_text(px(d), bottom + 18, text=f"{d / 1000:.2f} km", fill=t["label_fg"])
-        c.create_text((left + right) // 2, ch - 12, text="Distance", fill=t["label_fg"])
-        c.create_text(18, (top + bottom) // 2, text="Elevation (m)", fill=t["label_fg"], angle=90)
-        for frac in range(5):
-            z = zmin + (zmax - zmin) * frac / 4
-            c.create_text(left - 8, py(z), text=f"{z:.0f}", anchor="e", fill=t["label_fg"])
-
-        m_per_px_h = xmax / (right - left)
-        exaggeration = m_per_px_h / ((zmax - zmin) / (bottom - top))
-        self._draw_legend(
-            [("fill", t["terrain_fill"], "Terrain (DEM)"),
-             ("dot", t["gnb"], f"gNB antenna, {gnb_h:g} m"),
-             ("dot", t["ue"], f"UE antenna, {ue_h:g} m"),
-             ("dash", t["link"], "Line between gNB and UE"),
-             (None, None, f"Vertical exaggeration x{exaggeration:.1f}")],
-            scale_bar(m_per_px_h))
-        self.status.set(f"Cross section: {distance_m(gnb_ll, ue_ll):.0f} m separation; "
-                        f"terrain from {os.path.basename(self.region.dem_path)}")
 
     # ---- export --------------------------------------------------------------
     def choose_template_dir(self):
