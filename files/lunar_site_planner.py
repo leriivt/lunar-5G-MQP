@@ -15,7 +15,6 @@ import csv
 import math
 import os
 import re
-import struct
 import sys
 import tkinter as tk
 from dataclasses import dataclass, field
@@ -94,6 +93,8 @@ THEME = {
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
     "grid": "#000000", "grid_label": "#b2ebf2", #81eb88
     "psr": "#29b6f6",                # tint for permanently shadowed regions
+    "link": "#ffeb3b",               # line between the gNB and the UE (map and cross section)
+    "terrain_fill": "#808080", "terrain_line": "#d7ccc8",   # cross-section terrain
 }
 
 
@@ -232,6 +233,7 @@ class Raster:
             mask |= arr == float(str(nodata).strip("\x00"))
         except (TypeError, ValueError):
             pass
+        self.elev = np.where(mask, np.nan, arr).astype(np.float32)   # metres; NaN = no data
         self.display = _shade(arr, mask, self.dx)
         self.display.thumbnail((DISPLAY_MAX_PX, DISPLAY_MAX_PX))
 
@@ -241,6 +243,34 @@ class Raster:
 
     def xy_to_frac(self, x, y):
         return (x - self.x0) / (self.width * self.dx), (self.y0 - y) / (self.height * self.dy)
+
+
+def elevation_profile(raster, p0, p1, samples=None):
+    """Ground distance (m) and DEM elevation (m, NaN where there is no data) along the straight
+    line between two map positions given as (fx, fy) fractions of the picture."""
+    if samples is None:                                   # about one sample per DEM pixel
+        n = int(np.hypot((p1[0] - p0[0]) * raster.width, (p1[1] - p0[1]) * raster.height)) + 1
+        samples = min(max(n, 60), 800)
+    t = np.linspace(0.0, 1.0, samples)
+    fx, fy = p0[0] + (p1[0] - p0[0]) * t, p0[1] + (p1[1] - p0[1]) * t
+    lonlat = [xy_to_lonlat(*raster.frac_to_xy(a, b)) for a, b in zip(fx, fy)]
+    dist = np.concatenate(([0.0], np.cumsum([distance_m(a, b) for a, b in zip(lonlat[:-1], lonlat[1:])])))
+    cx = np.clip(fx * raster.width - 0.5, 0, raster.width - 1)     # pixel centres sit at i + 0.5
+    cy = np.clip(fy * raster.height - 0.5, 0, raster.height - 1)
+    x0 = np.minimum(np.floor(cx).astype(int), raster.width - 2)
+    y0 = np.minimum(np.floor(cy).astype(int), raster.height - 2)
+    tx, ty, e = cx - x0, cy - y0, raster.elev
+    z = ((1 - tx) * (1 - ty) * e[y0, x0] + tx * (1 - ty) * e[y0, x0 + 1]
+         + (1 - tx) * ty * e[y0 + 1, x0] + tx * ty * e[y0 + 1, x0 + 1])
+    return dist, z
+
+
+def scale_bar(m_per_px, target_px=110):
+    """(bar length in pixels, label) for a scale bar roughly target_px wide (1, 2 or 5 x 10^n)."""
+    raw = m_per_px * target_px
+    base = 10 ** math.floor(math.log10(raw))
+    length = max(k for k in (1, 2, 5, 10) if k * base <= raw) * base
+    return length / m_per_px, (f"{length:g} m" if length < 1000 else f"{length / 1000:g} km")
 
 
 # ----------------------------------------------------------------------------
@@ -696,11 +726,9 @@ class PlannerApp(tk.Tk):
         ox, oy = (cw - iw * scale) / 2, (ch - ih * scale) / 2
         self._view = (scale, ox, oy, iw, ih)
         size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
-        shown = self.raster.display.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
         if self.mode == "region" and self.view_mode == "cross":
             self.cross_section_view()
             return
-        self.photo = ImageTk.PhotoImage(shown)
         self.photo = ImageTk.PhotoImage(self._background(size))
         c.create_image(ox, oy, anchor="nw", image=self.photo)
         if self.show_grid.get():
@@ -709,6 +737,7 @@ class PlannerApp(tk.Tk):
             self._draw_atlas_markers()
         else:
             self._draw_region_overlays()
+        self._draw_legend(*self._map_legend())
 
     # ---- topographic overlay -------------------------------------------------
     def _current_overlay(self):
@@ -788,6 +817,68 @@ class PlannerApp(tk.Tk):
             self._bg_img, self._bg_key = base, key
         return self._bg_img
 
+    # ---- legend ---------------------------------------------------------------
+    def _map_legend(self):
+        """(items, scale bar) describing what is on the map right now."""
+        t = THEME
+        if self.mode == "atlas":
+            items = [("dot", t["marker"], "Region with terrain tile")]
+            if self.missing:
+                items.append(("ring", t["missing_fg"], "Site without terrain tile"))
+            if self.focus:
+                items.append(("box", t["footprint"], "Last opened region"))
+        else:
+            items = [("dot", t["gnb"], "gNB"), ("dot", t["ue"], "UE"),
+                     ("dash", t["link"], "Line between gNB and UE")]
+            if self.show_cands.get():
+                items += [("dot", t["cand_ridge"], "Candidate mast (ridge)"),
+                          ("dot", t["cand_landing"], "Candidate mast (landing site)")]
+        if self.show_psr.get() and self._current_psr():
+            items.append(("fill", t["psr"], "Permanently shadowed region"))
+        if self.show_topo.get() and self._current_overlay() is not None:
+            items.append(("line", "#bdbdbd", "Topographic overlay"))
+        if self.show_grid.get():
+            items.append(("line", t["grid"], "Lon/lat grid"))
+        zoom, ox, oy, iw, ih = self._view
+        return items, scale_bar(self.raster.width * self.raster.dx / (iw * zoom))
+
+    def _draw_legend(self, items, scale=None):
+        """Legend plate in the bottom-right corner. items: [(kind, colour, text)], kind one of
+        dot / ring / line / dash / box / fill, or None for a plain text line. scale: (bar pixels, label)."""
+        c, t = self.canvas, THEME
+        font = (self.font_family, self.font_size)
+        row = int(self.font_size * 2.2) + 2
+        y = 0
+        for kind, colour, text in items:
+            cy = y + row / 2
+            if kind == "dot":
+                c.create_oval(4, cy - 5, 14, cy + 5, fill=colour, outline=t["marker_outline"], width=2, tags="legend")
+            elif kind == "ring":
+                c.create_oval(4, cy - 5, 14, cy + 5, outline=colour, width=2, tags="legend")
+            elif kind in ("line", "dash"):
+                c.create_line(0, cy, 24, cy, fill="#cfd8dc", width=4, tags="legend")   # light backing keeps dark lines visible
+                c.create_line(0, cy, 24, cy, fill=colour, width=2, dash=(5, 3) if kind == "dash" else None, tags="legend")
+            elif kind == "box":
+                c.create_rectangle(2, cy - 5, 16, cy + 5, outline=colour, width=2, tags="legend")
+            elif kind == "fill":
+                c.create_rectangle(2, cy - 5, 16, cy + 5, fill=colour, outline="", tags="legend")
+            c.create_text(30 if kind else 2, cy, text=text, anchor="w", fill=t["label_fg"], font=font, tags="legend")
+            y += row
+        if scale:
+            length, label = scale
+            y += 6
+            c.create_line(0, y + 4, length, y + 4, fill=t["label_fg"], width=2, tags="legend")
+            for x in (0, length):
+                c.create_line(x, y, x, y + 8, fill=t["label_fg"], width=2, tags="legend")
+            c.create_text(length / 2, y + 11, text=label, anchor="n", fill=t["label_fg"], font=font, tags="legend")
+        box = c.bbox("legend")
+        if not box:
+            return
+        c.move("legend", c.winfo_width() - 16 - box[2], c.winfo_height() - 16 - box[3])
+        x1, y1, x2, y2 = c.bbox("legend")
+        plate = c.create_rectangle(x1 - 8, y1 - 8, x2 + 8, y2 + 8, fill=t["label_bg"], outline=t["border"])
+        c.tag_lower(plate, "legend")
+
     def _canvas_xy(self, fx, fy):
         scale, ox, oy, iw, ih = self._view
         return ox + fx * iw * scale, oy + fy * ih * scale
@@ -852,6 +943,9 @@ class PlannerApp(tk.Tk):
                     cx, cy = self._canvas_xy(fx, fy)
                     c.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, fill=colors.get(cls, "#ffffff"), outline="#000000")
         size = (c.winfo_width(), c.winfo_height())
+        if all(self.points.values()):                        # line between gNB and UE, follows the markers
+            (x1, y1), (x2, y2) = self._canvas_xy(*self.points["gNB"]), self._canvas_xy(*self.points["UE"])
+            c.create_line(x1, y1, x2, y2, fill=t["link"], width=2, dash=(6, 4))
         for who, pt in self.points.items():
             if pt:
                 cx, cy = self._canvas_xy(*pt)
@@ -1079,131 +1173,92 @@ class PlannerApp(tk.Tk):
         self.redraw()
 
     def cross_section_view(self):
-        """Draw the terrain and antenna heights between the placed gNB and UE."""
-        c = self.canvas
+        """Draw the DEM terrain and the antenna heights along the line between the gNB and the UE."""
+        c, t = self.canvas, THEME
         c.delete("all")
+
+        def message(text):
+            self._label(c, 20, 20, text, t["label_fg"], "nw")
+
         if self.mode != "region":
-            self._label(c, 20, 20, "Open a region to view a cross section.", THEME["label_fg"], "nw")
-            return
+            return message("Open a region to view a cross section.")
         if not all(self.points.values()):
-            self._label(c, 20, 20, "Place both the gNB and the UE to view a cross section.",
-                        THEME["label_fg"], "nw")
-            return
-
-        bdem = find_bdem(self.region.stem)
-        if not os.path.exists(bdem):
-            self._label(c, 20, 20, f".bdem file not found: {bdem}", THEME["label_fg"], "nw")
-            self.status.set("Cross section unavailable: no .bdem terrain file found.")
-            return
+            return message("Place both the gNB and the UE to view a cross section.")
         try:
-            with open(bdem, "rb") as f:
-                header = f.read(struct.calcsize("<4sii4d"))
-                if len(header) != struct.calcsize("<4sii4d"):
-                    raise ValueError("truncated header")
-                magic, n_lon, n_lat, min_lon, max_lon, min_lat, max_lat = struct.unpack("<4sii4d", header)
-                if magic != b"BDEM" or n_lon <= 1 or n_lat <= 1:
-                    raise ValueError("invalid BDEM header")
-                elevations = np.fromfile(f, dtype="<f4", count=n_lon * n_lat)
-            if elevations.size != n_lon * n_lat:
-                raise ValueError("truncated elevation data")
-            elevations = elevations.reshape((n_lat, n_lon))
-        except (OSError, ValueError, struct.error) as err:
-            self._label(c, 20, 20, f"Cannot read .bdem: {err}", THEME["label_fg"], "nw")
-            return
-
-        gnb_lonlat = self.lonlat("gNB")
-        ue_lonlat = self.lonlat("UE")
-        if gnb_lonlat == ue_lonlat:
-            self._label(c, 20, 20, "gNB and UE cannot be at the same position.", THEME["label_fg"], "nw")
-            return
-
-        samples = 160
-        lon_delta = (ue_lonlat[0] - gnb_lonlat[0] + 180.0) % 360.0 - 180.0
-        lons = gnb_lonlat[0] + lon_delta * np.linspace(0.0, 1.0, samples)
-        lats = gnb_lonlat[1] + (ue_lonlat[1] - gnb_lonlat[1]) * np.linspace(0.0, 1.0, samples)
-        distances = np.array([distance_m(gnb_lonlat, (float(lon), float(lat))) for lon, lat in zip(lons, lats)])
-
-        terrain = np.empty(samples, dtype=np.float32)
-        for i, (lon, lat) in enumerate(zip(lons, lats)):
-            lon -= 360.0 * round((lon - (min_lon + max_lon) / 2.0) / 360.0)
-            if lon < min_lon or lon > max_lon or lat < min_lat or lat > max_lat:
-                terrain[i] = np.nan
-                continue
-            fx = (lon - min_lon) / (max_lon - min_lon) * (n_lon - 1)
-            fy = (lat - min_lat) / (max_lat - min_lat) * (n_lat - 1)
-            x0, y0 = min(int(fx), n_lon - 2), min(int(fy), n_lat - 2)
-            tx, ty = fx - x0, fy - y0
-            terrain[i] = ((1 - tx) * (1 - ty) * elevations[y0, x0]
-                          + tx * (1 - ty) * elevations[y0, x0 + 1]
-                          + (1 - tx) * ty * elevations[y0 + 1, x0]
-                          + tx * ty * elevations[y0 + 1, x0 + 1])
-
-        valid = np.isfinite(terrain)
-        if not valid.any():
-            self._label(c, 20, 20, "The gNB-to-UE line is outside the .bdem grid.", THEME["label_fg"], "nw")
-            return
-        d_valid = distances[valid]
-        z_valid = terrain[valid]
-
-        try:
-            gnb_h = float(self.height_vars["gNB"].get())
-            ue_h = float(self.height_vars["UE"].get())
+            gnb_h, ue_h = float(self.height_vars["gNB"].get()), float(self.height_vars["UE"].get())
         except ValueError:
-            self._label(c, 20, 20, "Antenna heights must be numbers.", THEME["label_fg"], "nw")
-            return
-        if not np.isfinite(gnb_h) or not np.isfinite(ue_h):
-            self._label(c, 20, 20, "Antenna heights must be finite numbers.", THEME["label_fg"], "nw")
-            return
+            return message("Antenna heights must be numbers.")
+        if not (np.isfinite(gnb_h) and np.isfinite(ue_h)):
+            return message("Antenna heights must be finite numbers.")
+        gnb_ll, ue_ll = self.lonlat("gNB"), self.lonlat("UE")
+        if gnb_ll == ue_ll:
+            return message("gNB and UE cannot be at the same position.")
+
+        dist, terrain = elevation_profile(self.raster, self.points["gNB"], self.points["UE"])
+        valid = np.isfinite(terrain)
+        if not (valid[0] and valid[-1]):
+            return message("The DEM has no elevation data at the gNB or the UE position.")
+        z_gnb, z_ue = float(terrain[0]), float(terrain[-1])
 
         cw, ch = c.winfo_width(), c.winfo_height()
-        left, right, top, bottom = 75, max(85, cw - 30), 35, max(70, ch - 55)
+        left, right, top, bottom = 75, max(85, cw - 260), 35, max(70, ch - 55)   # right column holds the legend
         if right <= left or bottom <= top:
             return
-        xmin, xmax = 0.0, max(float(distances[-1]), 1.0)
-        values = np.concatenate((
-            z_valid.astype(float),
-            np.array([gnb_h + float(z_valid[0]), ue_h + float(z_valid[-1])], dtype=float),
-        ))
-        zmin, zmax = float(np.min(values)), float(np.max(values))
+        xmax = max(float(dist[-1]), 1.0)
+        values = np.concatenate((terrain[valid].astype(float), [z_gnb + gnb_h, z_ue + ue_h]))
+        zmin, zmax = float(values.min()), float(values.max())
         zspan = max(zmax - zmin, 1.0)
-        zmin -= zspan * 0.12
-        zmax += zspan * 0.12
-        def px(d): return min(right, max(left, left + (d - xmin) / (xmax - xmin) * (right - left)))
-        def py(z): return min(bottom, max(top, bottom - (z - zmin) / (zmax - zmin) * (bottom - top)))
+        zmin, zmax = zmin - zspan * 0.12, zmax + zspan * 0.12
+        def px(d): return left + d / xmax * (right - left)
+        def py(z): return bottom - (z - zmin) / (zmax - zmin) * (bottom - top)
 
         c.create_text((left + right) // 2, 16, text=f"Cross section: {self.region.label}",
-                      fill=THEME["label_fg"], font=(self.font_family, self.font_size + 2, "bold"))
+                      fill=t["label_fg"], font=(self.font_family, self.font_size + 2, "bold"))
         c.create_line(left, bottom, right, bottom, fill="#9e9e9e")
         c.create_line(left, top, left, bottom, fill="#9e9e9e")
 
-        xs, ys = [px(float(d)) for d in d_valid], [py(float(z)) for z in z_valid]
-        c.create_polygon([left, bottom] + sum(([x, y] for x, y in zip(xs, ys)), []) + [right, bottom],
-                         fill="#808080", outline="")
-        for i in range(len(xs) - 1):
-            c.create_line(xs[i], ys[i], xs[i + 1], ys[i + 1], fill="#d7ccc8", width=2)
+        idx = np.flatnonzero(valid)                                  # draw each run of valid data on its own
+        for run in np.split(idx, np.flatnonzero(np.diff(idx) > 1) + 1):
+            if len(run) < 2:
+                continue
+            pts = [v for i in run for v in (px(float(dist[i])), py(float(terrain[i])))]
+            c.create_polygon([pts[0], bottom] + pts + [pts[-2], bottom], fill=t["terrain_fill"], outline="")
+            c.create_line(*pts, fill=t["terrain_line"], width=2)
 
-        for who, lonlat, color in (("gNB", gnb_lonlat, THEME["gnb"]), ("UE", ue_lonlat, THEME["ue"])):
+        tops = {}
+        for who, d, z_ground, height, color in (("gNB", 0.0, z_gnb, gnb_h, t["gnb"]),
+                                                 ("UE", xmax, z_ue, ue_h, t["ue"])):
+            tops[who] = (px(d), py(z_ground + height))
+        c.create_line(*tops["gNB"], *tops["UE"], fill=t["link"], width=2, dash=(6, 4))   # gNB-UE line
+        for who, d, z_ground, height, color in (("gNB", 0.0, z_gnb, gnb_h, t["gnb"]),
+                                                 ("UE", xmax, z_ue, ue_h, t["ue"])):
+            x, y_top = tops[who]
+            c.create_line(x, py(z_ground), x, y_top, fill=color, width=3)
+            c.create_oval(x - 5, y_top - 5, x + 5, y_top + 5, fill=color, outline="#ffffff")
             at_start = who == "gNB"
-            d = 0.0 if at_start else xmax
-            z_ground = float(z_valid[0] if at_start else z_valid[-1])
-            z_height = gnb_h if at_start else ue_h
-            x, z_ground_y = px(d), py(z_ground)
-            z_top_y = py(z_ground + z_height)
-            c.create_line(x, z_ground_y, x, z_top_y, fill=color, width=3)
-            c.create_oval(x - 5, z_top_y - 5, x + 5, z_top_y + 5, fill=color, outline="#ffffff")
-            self._label(c, x + (8 if at_start else -8), z_top_y - 8,
-                        f"{who} {z_height:g} m", THEME["label_fg"], "sw" if at_start else "se")
+            self._label(c, x + (8 if at_start else -8), y_top - 8, f"{who} {height:g} m",
+                        t["label_fg"], "sw" if at_start else "se")
 
         for frac in range(5):
             d = xmax * frac / 4
-            c.create_text(px(d), bottom + 18, text=f"{d / 1000:.2f} km", fill=THEME["label_fg"])
-        c.create_text((left + right) // 2, ch - 12, text="Distance", fill=THEME["label_fg"])
-        c.create_text(18, (top + bottom) // 2, text="Elevation (m)", fill=THEME["label_fg"], angle=90)
+            c.create_text(px(d), bottom + 18, text=f"{d / 1000:.2f} km", fill=t["label_fg"])
+        c.create_text((left + right) // 2, ch - 12, text="Distance", fill=t["label_fg"])
+        c.create_text(18, (top + bottom) // 2, text="Elevation (m)", fill=t["label_fg"], angle=90)
         for frac in range(5):
             z = zmin + (zmax - zmin) * frac / 4
-            c.create_text(left - 8, py(z), text=f"{z:.0f}", anchor="e", fill=THEME["label_fg"])
-        separation = distance_m(gnb_lonlat, ue_lonlat)
-        self.status.set(f"Cross section: {separation:.0f} m separation; terrain from {bdem}")
+            c.create_text(left - 8, py(z), text=f"{z:.0f}", anchor="e", fill=t["label_fg"])
+
+        m_per_px_h = xmax / (right - left)
+        exaggeration = m_per_px_h / ((zmax - zmin) / (bottom - top))
+        self._draw_legend(
+            [("fill", t["terrain_fill"], "Terrain (DEM)"),
+             ("dot", t["gnb"], f"gNB antenna, {gnb_h:g} m"),
+             ("dot", t["ue"], f"UE antenna, {ue_h:g} m"),
+             ("dash", t["link"], "Line between gNB and UE"),
+             (None, None, f"Vertical exaggeration x{exaggeration:.1f}")],
+            scale_bar(m_per_px_h))
+        self.status.set(f"Cross section: {distance_m(gnb_ll, ue_ll):.0f} m separation; "
+                        f"terrain from {os.path.basename(self.region.dem_path)}")
 
     # ---- export --------------------------------------------------------------
     def choose_template_dir(self):
