@@ -592,7 +592,16 @@ class PlannerApp(tk.Tk):
         self.show_grid = tk.BooleanVar(value=False)
         ttk.Checkbutton(panel, text="Show lon/lat grid", variable=self.show_grid,
                         command=self.redraw).pack(anchor="w")
-
+        row = ttk.Frame(panel)
+        row.pack(fill="x", pady=(0, 4))
+        self.show_topo = tk.BooleanVar(value=False)
+        self.topo_opacity = tk.DoubleVar(value=TOPO_OPACITY)
+        ttk.Checkbutton(row, text="Topographic overlay", variable=self.show_topo,
+                        command=self.on_topo_toggle).pack(side="left")
+        self.show_psr = tk.BooleanVar(value=False)
+        ttk.Checkbutton(panel, text="Permanently shadowed regions", variable=self.show_psr,
+                        command=self.on_psr_toggle).pack(anchor="w", pady=(0, 4))
+        
         ttk.Button(panel, text="Set OAI CONF template folder (optional)",
                    command=self.choose_template_dir).pack(fill="x")
         ttk.Button(panel, text="Export gNB + UE configs...", command=self.export).pack(fill="x", pady=4)
@@ -1098,8 +1107,6 @@ class PlannerApp(tk.Tk):
         except (OSError, ValueError, struct.error) as err:
             self._label(c, 20, 20, f"Cannot read .bdem: {err}", THEME["label_fg"], "nw")
             return
-
-        print( max_lat, max_lon, min_lat, min_lon)
 
         gnb_lonlat = self.lonlat("gNB")
         ue_lonlat = self.lonlat("UE")
