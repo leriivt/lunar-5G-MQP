@@ -93,6 +93,7 @@ THEME = {
     "gnb": "#c62828", "ue": "#1565c0",                  # gNB / UE markers and panel headings
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
     "grid": "#ffffff", "grid_label": "#b2ebf2", #81eb88
+    "psr": "#29b6f6",                # tint for permanently shadowed regions
 }
 
 
@@ -694,11 +695,13 @@ class PlannerApp(tk.Tk):
         scale = min(cw / iw, ch / ih)
         ox, oy = (cw - iw * scale) / 2, (ch - ih * scale) / 2
         self._view = (scale, ox, oy, iw, ih)
+        size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
         shown = self.raster.display.resize((max(1, int(iw * scale)), max(1, int(ih * scale))))
         if self.mode == "region" and self.view_mode == "cross":
             self.cross_section_view()
             return
         self.photo = ImageTk.PhotoImage(shown)
+        self.photo = ImageTk.PhotoImage(self._background(size))
         c.create_image(ox, oy, anchor="nw", image=self.photo)
         if self.show_grid.get():
             self._draw_grid()
