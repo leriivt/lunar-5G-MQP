@@ -542,12 +542,20 @@ class PlannerApp(tk.Tk):
         super().__init__()
         self.title("Lunar Site Planner")
         self.geometry("1260x880")
+        self.minsize(800, 600)
         self.font_family, self.font_size = apply_theme(self)
         self.regions, self.missing, self.candidates = regions, missing, candidates
         self.rasters = {}               # cache: path -> Raster
         self.mode = "atlas"             # "atlas" or "region"
         self._link = None               # gNB-UE terrain profile and line-of-sight result
         self._inset_rect = None         # screen rectangle of the cross-section inset
+        self._inset_size = None         # user-selected (width, height) for the inset
+        self._inset_position = None     # user-selected top-left position; None uses top-right default
+        self._inset_handle = None       # top-left resize handle
+        self._inset_drag = None
+        self._map_zoom = 1.0            # zoom multiplier from the map's fitted size
+        self._map_pan = (0.0, 0.0)
+        self._map_pan_drag = None
         self.region = None
         self.raster = None
         self.pole = None                # the atlas raster (kept while a region is open)
@@ -657,6 +665,13 @@ class PlannerApp(tk.Tk):
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         self.canvas.bind("<Button-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Button-3>", self.on_pan_press)
+        self.canvas.bind("<B3-Motion>", self.on_pan_drag)
+        self.canvas.bind("<ButtonRelease-3>", self.on_pan_release)
+        self.canvas.bind("<MouseWheel>", self.on_mousewheel)
+        self.canvas.bind("<Button-4>", lambda e: self.on_mousewheel_zoom(e, 1.1))
+        self.canvas.bind("<Button-5>", lambda e: self.on_mousewheel_zoom(e, 0.9))
 
     # ---- screens -------------------------------------------------------------
     def _load(self, path):
@@ -668,6 +683,8 @@ class PlannerApp(tk.Tk):
 
     def show_atlas(self):
         self.mode, self.region = "atlas", None
+        self._map_zoom = 1.0
+        self._map_pan = (0.0, 0.0)
         self.choice.set(ATLAS_LABEL)
         self.points = {"gNB": None, "UE": None}
         try:
@@ -689,6 +706,8 @@ class PlannerApp(tk.Tk):
             messagebox.showerror("Region map", f"Cannot read {region.dem_path}\n{err}")
             return
         self.mode, self.region, self.raster, self.focus = "region", region, raster, region
+        self._map_zoom = 1.0
+        self._map_pan = (0.0, 0.0)
         self.choice.set(region.label)
         self.points = {"gNB": None, "UE": None}
         note = self._apply_gnb_default(stem, raster)
@@ -726,8 +745,10 @@ class PlannerApp(tk.Tk):
             return
         cw, ch = c.winfo_width(), c.winfo_height()
         iw, ih = self.raster.display.size
-        scale = min(cw / iw, ch / ih)
-        ox, oy = (cw - iw * scale) / 2, (ch - ih * scale) / 2
+        fit_scale = min(cw / iw, ch / ih)
+        scale = fit_scale * self._map_zoom
+        pan_x, pan_y = self._map_pan
+        ox, oy = (cw - iw * scale) / 2 + pan_x, (ch - ih * scale) / 2 + pan_y
         self._view = (scale, ox, oy, iw, ih)
         size = (max(1, int(iw * scale)), max(1, int(ih * scale)))
         self._inset_rect = None
@@ -862,22 +883,48 @@ class PlannerApp(tk.Tk):
         r = self._inset_rect
         return bool(r and r[0] <= event.x <= r[2] and r[1] <= event.y <= r[3])
 
+    def _in_inset_handle(self, event):
+        r = self._inset_handle
+        return bool(r and r[0] <= event.x <= r[2] and r[1] <= event.y <= r[3])
+
+    def _in_inset_header(self, event):
+        r = self._inset_rect
+        return bool(r and r[0] <= event.x <= r[2] and r[1] <= event.y <= r[1] + 38)
+
     def _draw_profile_inset(self):
-        """Mini cross section of the gNB-UE line in the top-right corner of the map."""
+        """Mini cross section of the gNB-UE line; movable and resizable on the map."""
         link = self._link
         if link is None or not self.show_inset.get():
+            self._inset_handle = None
             return
         c, t = self.canvas, THEME
         cw = c.winfo_width()
-        w, h = min(440, int(cw * 0.45)), 235
-        if w < 240:
+        ch = c.winfo_height()
+        default_w = min(440, int(cw * 0.45))
+        if self._inset_size is None:
+            w, h = default_w, 235
+        else:
+            w, h = self._inset_size
+        w = max(240, min(w, cw - 24))
+        h = max(160, min(h, ch - 24))
+        self._inset_size = (w, h)
+        if cw < 264 or ch < 184:
             return
-        x1, y0 = cw - 12, 12
-        x0, y1 = x1 - w, y0 + h
+        if self._inset_position is None:
+            x0, y0 = cw - 12 - w, 12
+        else:
+            x0, y0 = self._inset_position
+        x0 = max(12, min(x0, cw - 12 - w))
+        y0 = max(12, min(y0, ch - 12 - h))
+        self._inset_position = (x0, y0)
+        x1, y1 = x0 + w, y0 + h
         self._inset_rect = (x0, y0, x1, y1)
+        self._inset_handle = (x0, y0, x0 + 12, y0 + 12)
         small = max(self.font_size - 1, 7)
         colour = self._link_colour(link)
         c.create_rectangle(x0, y0, x1, y1, fill=t["label_bg"], outline=t["border"], width=2)
+        hx0, hy0, hx1, hy1 = self._inset_handle
+        c.create_rectangle(hx0, hy0, hx1, hy1, fill=t["border"], outline="")
         c.create_text(x0 + 8, y0 + 7, text="Cross section", anchor="nw", fill=t["label_focus_fg"],
                       font=(self.font_family, self.font_size, "bold"))
         if link["message"]:
@@ -1130,6 +1177,13 @@ class PlannerApp(tk.Tk):
 
     def on_press(self, event):
         if self.raster is None or self._in_inset(event):
+            if self._in_inset_handle(event):
+                w, h = self._inset_size if self._inset_size else (440, 235)
+                x0, y0, x1, y1 = self._inset_rect
+                self._inset_drag = ("resize", event.x, event.y, x0, y0, x1, y1, w, h)
+            elif self._in_inset_header(event):
+                x0, y0, _, _ = self._inset_rect
+                self._inset_drag = ("move", event.x, event.y, x0, y0)
             return
         if self.mode == "atlas":
             hits = [(math.hypot(event.x - x, event.y - y), t) for x, y, t in self._hits]
@@ -1143,8 +1197,59 @@ class PlannerApp(tk.Tk):
             self.place(event)
 
     def on_drag(self, event):
+        if self._inset_drag:
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            if self._inset_drag[0] == "resize":
+                _, start_x, start_y, _, _, fixed_x1, fixed_y1, _, _ = self._inset_drag
+                new_x0 = max(12, min(event.x, fixed_x1 - 240))
+                new_y0 = max(12, min(event.y, fixed_y1 - 160))
+                self._inset_position = (new_x0, new_y0)
+                self._inset_size = (max(240, fixed_x1 - new_x0),
+                                    max(160, fixed_y1 - new_y0))
+            else:
+                _, start_x, start_y, start_x0, start_y0 = self._inset_drag
+                w, h = self._inset_size or (440, 235)
+                new_x0 = max(12, min(cw - w - 12, start_x0 + event.x - start_x))
+                new_y0 = max(12, min(ch - h - 12, start_y0 + event.y - start_y))
+                self._inset_position = (new_x0, new_y0)
+            self.redraw()
+            return
         if self.mode == "region" and not self._in_inset(event):
             self.place(event)
+
+    def on_release(self, event):
+        self._inset_drag = None
+
+    def on_pan_press(self, event):
+        self._map_pan_drag = (event.x, event.y, self._map_pan)
+
+    def on_pan_drag(self, event):
+        if self._map_pan_drag:
+            start_x, start_y, pan = self._map_pan_drag
+            self._map_pan = (pan[0] + event.x - start_x, pan[1] + event.y - start_y)
+            self.redraw()
+
+    def on_pan_release(self, event):
+        self._map_pan_drag = None
+
+    def on_mousewheel(self, event):
+        factor = 1.1 if event.delta > 0 else 0.9
+        self.on_mousewheel_zoom(event, factor)
+
+    def on_mousewheel_zoom(self, event, factor):
+        if self.raster is None:
+            return
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        iw, ih = self.raster.display.size
+        scale, ox, oy, _, _ = self._view
+        fx = (event.x - ox) / (iw * scale)
+        fy = (event.y - oy) / (ih * scale)
+        self._map_zoom = max(1.0, min(8.0, self._map_zoom * factor))
+        new_scale = min(cw / iw, ch / ih) * self._map_zoom
+        pan_x = event.x - (cw - iw * new_scale) / 2 - iw * new_scale * fx
+        pan_y = event.y - (ch - ih * new_scale) / 2 - ih * new_scale * fy
+        self._map_pan = (pan_x, pan_y)
+        self.redraw()
 
     def place(self, event):
         fx, fy = self._frac(event)
