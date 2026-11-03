@@ -592,10 +592,6 @@ class PlannerApp(tk.Tk):
         box.bind("<<ComboboxSelected>>", lambda e: self.on_choice())
         ttk.Button(panel, text="< Back to atlas", command=self.show_atlas).pack(fill="x", pady=(4, 8))
 
-        self.show_inset = tk.BooleanVar(value=True)
-        ttk.Checkbutton(panel, text="Cross-section inset", variable=self.show_inset,
-                        command=self.redraw).pack(anchor="w", pady=(0, 8))
-
         # one group per node: pick it, then click the map OR type its coordinates
         self.active = tk.StringVar(value="gNB")
         self.lon_vars = {w: tk.StringVar() for w in NODES}
@@ -633,24 +629,6 @@ class PlannerApp(tk.Tk):
         self.sep_var = tk.StringVar(value="Separation: -")
         ttk.Label(panel, textvariable=self.sep_var, font=(self.font_family, self.font_size, "bold")
                   ).pack(anchor="w", pady=(6, 0))
-        self.show_cands = tk.BooleanVar(value=False)
-        ttk.Checkbutton(panel, text="Show atlas candidate masts", variable=self.show_cands,
-                        command=self.redraw,
-                        state="normal" if self.candidates else "disabled").pack(anchor="w", pady=4)
-
-        self.show_grid = tk.BooleanVar(value=False)
-        ttk.Checkbutton(panel, text="Show lon/lat grid", variable=self.show_grid,
-                        command=self.redraw).pack(anchor="w")
-        row = ttk.Frame(panel)
-        row.pack(fill="x", pady=(0, 4))
-        self.show_topo = tk.BooleanVar(value=False)
-        self.topo_opacity = tk.DoubleVar(value=TOPO_OPACITY)
-        ttk.Checkbutton(row, text="Topographic overlay", variable=self.show_topo,
-                        command=self.on_topo_toggle).pack(side="left")
-        self.show_psr = tk.BooleanVar(value=False)
-        ttk.Checkbutton(panel, text="Permanently shadowed regions", variable=self.show_psr,
-                        command=self.on_psr_toggle).pack(anchor="w", pady=(0, 4))
-        
         ttk.Button(panel, text="Set OAI CONF template folder (optional)",
                    command=self.choose_template_dir).pack(fill="x")
         ttk.Button(panel, text="Export gNB + UE configs...", command=self.export).pack(fill="x", pady=4)
@@ -672,6 +650,26 @@ class PlannerApp(tk.Tk):
         self.canvas.bind("<MouseWheel>", self.on_mousewheel)
         self.canvas.bind("<Button-4>", lambda e: self.on_mousewheel_zoom(e, 1.1))
         self.canvas.bind("<Button-5>", lambda e: self.on_mousewheel_zoom(e, 0.9))
+
+        # all overlay controls live in one box in the top-right corner of the map (all on at startup)
+        self.controls = ttk.Frame(self.canvas, padding=(8, 6), relief="solid", borderwidth=1)
+        self.controls.place(relx=1.0, x=-12, y=12, anchor="ne")
+        ttk.Label(self.controls, text="Overlays",
+                  font=(self.font_family, self.font_size, "bold")).pack(anchor="w")
+        self.show_cands = tk.BooleanVar(value=bool(self.candidates))
+        self.show_grid = tk.BooleanVar(value=True)
+        self.show_topo = tk.BooleanVar(value=True)
+        self.show_psr = tk.BooleanVar(value=True)
+        self.show_inset = tk.BooleanVar(value=True)
+        self.topo_opacity = tk.DoubleVar(value=TOPO_OPACITY)
+        for text, var, command, state in (
+                ("Candidate masts", self.show_cands, self.redraw, "normal" if self.candidates else "disabled"),
+                ("Lon/lat grid", self.show_grid, self.redraw, "normal"),
+                ("Topographic overlay", self.show_topo, self.on_topo_toggle, "normal"),
+                ("Permanently shadowed regions", self.show_psr, self.on_psr_toggle, "normal"),
+                ("Cross-section inset", self.show_inset, self.redraw, "normal")):
+            ttk.Checkbutton(self.controls, text=text, variable=var, command=command,
+                            state=state).pack(anchor="w")
 
     # ---- screens -------------------------------------------------------------
     def _load(self, path):
@@ -754,7 +752,7 @@ class PlannerApp(tk.Tk):
         self._inset_rect = None
         self._link = self._compute_link()
         if self._link:
-            self.sep_var.set(f"Separation: {self._link_text(self._link)}")
+            self.sep_var.set(self._sep_readout(self._link))
         self.photo = ImageTk.PhotoImage(self._background(size))
         c.create_image(ox, oy, anchor="nw", image=self.photo)
         if self.show_grid.get():
@@ -867,17 +865,37 @@ class PlannerApp(tk.Tk):
         else:
             chord = chord_height(dist, float(terrain[0]), gnb_h, float(terrain[-1]), ue_h)
             clearance = float(np.nanmin(chord - terrain))      # NaN (no-data) samples are ignored
-            link.update(chord=chord, clearance=clearance, status="clear" if clearance >= 0 else "blocked")
+            # straight-line (LOS) path length between the antenna tops: ground arc, elevation and mast heights
+            R = BODY_RADIUS_M
+            ra, rb = R + float(terrain[0]) + gnb_h, R + float(terrain[-1]) + ue_h
+            path = math.sqrt((rb - ra) ** 2 + 4 * ra * rb * math.sin(link["sep"] / R / 2) ** 2)
+            link.update(chord=chord, clearance=clearance, path=path,
+                        status="clear" if clearance >= 0 else "blocked")
         return link
 
     def _link_colour(self, link):
         key = {"clear": "los_clear", "blocked": "los_blocked"}.get(link["status"] if link else None, "link")
         return THEME[key]
 
+    @staticmethod
+    def _fmt_dist(d):
+        return f"{d:.1f} m" if d < 1000 else f"{d / 1000:.3f} km"
+
     def _link_text(self, link):
-        d = link["sep"]
-        text = f"{d:.0f} m" if d < 1000 else f"{d / 1000:.2f} km"
+        """Label for the line: the LOS path length (with elevation) when known, else the ground distance."""
+        text = self._fmt_dist(link.get("path", link["sep"]))
         return text + {"clear": " LOS", "blocked": " NLOS"}.get(link["status"], "")
+
+    def _sep_readout(self, link):
+        text = f"Ground separation: {self._fmt_dist(link['sep'])}"
+        if "path" in link:
+            text += f"\nLOS path (with elevation): {self._fmt_dist(link['path'])}"
+        return text
+
+    def _controls_bottom(self):
+        """Bottom edge, in canvas pixels, of the overlay-controls box."""
+        self.controls.update_idletasks()
+        return 12 + self.controls.winfo_reqheight()
 
     def _in_inset(self, event):
         r = self._inset_rect
@@ -910,13 +928,12 @@ class PlannerApp(tk.Tk):
         self._inset_size = (w, h)
         if cw < 264 or ch < 184:
             return
-        if self._inset_position is None:
-            x0, y0 = cw - 12 - w, 12
+        if self._inset_position is None:                    # default: top right, just below the overlay controls
+            x0, y0 = cw - 12 - w, self._controls_bottom() + 8
         else:
             x0, y0 = self._inset_position
         x0 = max(12, min(x0, cw - 12 - w))
         y0 = max(12, min(y0, ch - 12 - h))
-        self._inset_position = (x0, y0)
         x1, y1 = x0 + w, y0 + h
         self._inset_rect = (x0, y0, x1, y1)
         self._inset_handle = (x0, y0, x0 + 12, y0 + 12)
@@ -1005,10 +1022,26 @@ class PlannerApp(tk.Tk):
         return items, scale_bar(self.raster.width * self.raster.dx / (iw * zoom))
 
     def _draw_legend(self, items, scale=None):
-        """Legend plate in the bottom-right corner. items: [(kind, colour, text)], kind one of
-        dot / ring / line / dash / box / fill, or None for a plain text line. scale: (bar pixels, label)."""
+        """Legend in the bottom-right corner of the window, and the scale bar directly on the map at
+        the bottom-right of the visible map picture. If the two would overlap, the scale bar moves up
+        above the legend. items: [(kind, colour, text)], kind one of dot / ring / line / dash / box /
+        fill, or None for plain text. scale: (bar pixels, label)."""
         c, t = self.canvas, THEME
         font = (self.font_family, self.font_size)
+        cw, ch = c.winfo_width(), c.winfo_height()
+
+        def settle(tag, right, bottom):
+            """Move group `tag` so its bottom-right corner is at (right, bottom - 6), put a plate behind
+            it, and return the plate rectangle (x1, y1, x2, y2)."""
+            box = c.bbox(tag)
+            if not box:
+                return None
+            c.move(tag, right - box[2], bottom - 6 - box[3])
+            x1, y1, x2, y2 = c.bbox(tag)
+            plate = c.create_rectangle(x1 - 8, y1 - 6, x2 + 8, y2 + 6, fill=t["label_bg"], outline=t["border"])
+            c.tag_lower(plate, tag)
+            return (x1 - 8, y1 - 6, x2 + 8, y2 + 6)
+
         row = int(self.font_size * 2.2) + 2
         y = 0
         for kind, colour, text in items:
@@ -1026,20 +1059,23 @@ class PlannerApp(tk.Tk):
                 c.create_rectangle(2, cy - 5, 16, cy + 5, fill=colour, outline="", tags="legend")
             c.create_text(30 if kind else 2, cy, text=text, anchor="w", fill=t["label_fg"], font=font, tags="legend")
             y += row
+        legend_rect = settle("legend", cw - 16, ch - 10)               # window corner, not tied to the map
+
         if scale:
             length, label = scale
-            y += 6
-            c.create_line(0, y + 4, length, y + 4, fill=t["label_fg"], width=2, tags="legend")
+            c.create_line(0, 4, length, 4, fill=t["label_fg"], width=2, tags="scale")
             for x in (0, length):
-                c.create_line(x, y, x, y + 8, fill=t["label_fg"], width=2, tags="legend")
-            c.create_text(length / 2, y + 11, text=label, anchor="n", fill=t["label_fg"], font=font, tags="legend")
-        box = c.bbox("legend")
-        if not box:
-            return
-        c.move("legend", c.winfo_width() - 16 - box[2], c.winfo_height() - 16 - box[3])
-        x1, y1, x2, y2 = c.bbox("legend")
-        plate = c.create_rectangle(x1 - 8, y1 - 8, x2 + 8, y2 + 8, fill=t["label_bg"], outline=t["border"])
-        c.tag_lower(plate, "legend")
+                c.create_line(x, 0, x, 8, fill=t["label_fg"], width=2, tags="scale")
+            c.create_text(length / 2, 11, text=label, anchor="n", fill=t["label_fg"], font=font, tags="scale")
+            zoom, ox, oy, iw, ih = self._view
+            right = min(ox + iw * zoom, cw) - 14                       # visible bottom-right corner of the map
+            bottom = min(oy + ih * zoom, ch) - 8
+            sx1, sy1, sx2, sy2 = c.bbox("scale")
+            w, h = sx2 - sx1 + 16, sy2 - sy1 + 12                      # plate size
+            if legend_rect and right + 8 > legend_rect[0] and right + 8 - w < legend_rect[2] \
+                    and bottom > legend_rect[1] and bottom - h < legend_rect[3]:
+                bottom = legend_rect[1] - 8                              # would overlap: sit just above the legend
+            settle("scale", right, bottom)
 
     def _canvas_xy(self, fx, fy):
         scale, ox, oy, iw, ih = self._view
