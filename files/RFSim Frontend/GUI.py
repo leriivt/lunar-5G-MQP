@@ -11,6 +11,7 @@ Planned features (README.md) - each has an empty TODO block below:
 import os
 import sys
 import subprocess
+from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                              QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QTabWidget,
                              QVBoxLayout, QWidget, QFileDialog)
@@ -99,15 +100,14 @@ class MainWindow(QMainWindow):
     # ---- 3. interchangeable .conf files --------------------------------------
     def browse_gnb_config(self):
         """Pick a gNB .conf file and put its path in self.gnb_conf."""
-        # TODO: open a file dialog (QFileDialog.getOpenFileName, filter "*.conf", start in CONF_DIR)
-        # TODO: if a file was chosen, self.gnb_conf.setText(path)
         file_name = QFileDialog.getOpenFileName(self, "Select gNB .conf file", CONF_DIR, "Config files (*.conf)")
-        pass
+        if (file_name): self.gnb_conf = file_name
+        
 
     def browse_ue_config(self):
         """Pick a UE .conf file and put its path in self.ue_conf."""
-        # TODO: same as browse_gnb_config, for self.ue_conf
-        pass
+        file_name = QFileDialog.getOpenFileName(self, "Select UE .conf file", CONF_DIR, "Config files (*.conf)")
+        if (file_name): self.ue_conf = file_name
 
     # ---- 1. gNB ---------------------------------------------------------------
     def start_gnb(self):
@@ -164,8 +164,9 @@ class MainWindow(QMainWindow):
 def main():
     # Qt's GTK3 theme loads GTK, which aborts on this machine's GNOME 42 ("...xsettings does not
     # contain a key named 'antialiasing'"). Qt's built-in GNOME theme avoids GTK.
-    if os.environ.get("QT_QPA_PLATFORMTHEME", "") in ("", "gtk3", "xdgdesktopportal"):
-        os.environ["QT_QPA_PLATFORMTHEME"] = "gnome"
+    if sys.platform.startswith("linux"):
+        if os.environ.get("QT_QPA_PLATFORMTHEME", "") in ("", "gtk3", "xdgdesktopportal"):
+            os.environ["QT_QPA_PLATFORMTHEME"] = "gnome"
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

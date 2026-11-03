@@ -1622,10 +1622,11 @@ class PlannerApp(QWidget):
 
 
 def main():
-    # Qt's GTK3 theme plugin loads GTK, which on GNOME 42 can abort on a removed GSettings key
-    # ("...xsettings does not contain a key named 'antialiasing'"). Qt's built-in GNOME theme avoids GTK.
-    if os.environ.get("QT_QPA_PLATFORMTHEME", "") in ("", "gtk3", "xdgdesktopportal"):
-        os.environ["QT_QPA_PLATFORMTHEME"] = "gnome"
+    # Qt's GTK3 theme plugin loads GTK, which on Linux GNOME 42 can abort on a removed GSettings key.
+    # Qt's built-in GNOME theme avoids GTK; Windows and macOS do not support this workaround.
+    if sys.platform.startswith("linux"):
+        if os.environ.get("QT_QPA_PLATFORMTHEME", "") in ("", "gtk3", "xdgdesktopportal"):
+            os.environ["QT_QPA_PLATFORMTHEME"] = "gnome"
     app = QApplication(sys.argv)
     try:
         regions, missing = load_catalog()
