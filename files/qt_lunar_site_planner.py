@@ -47,6 +47,7 @@ SITES_CSV = os.path.join(APP_DIR, "sites.csv")                           # id,na
 TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # your .bdem files
 POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific .bdem
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
+TEMPLATE_DIR = os.path.join(APP_DIR, "Templates")                       # OAI gNB/UE .conf templates filled on export
 # Topographic overlays: transparent *_topo_hq.png files, searched in these folders in order
 TOPO_POLE_FOLDERS = [ATLAS_DIR, BUNDLE_DIR]
 TOPO_REGION_FOLDERS = [REGION_DIR, os.path.join(BUNDLE_DIR, "regions"), ATLAS_DIR]
@@ -738,7 +739,6 @@ class PlannerApp(QWidget):
         self._cov_key = self._coverage = None    # UE LOS coverage: (QImage, fraction in view) or None
         self._legend = ([], None)       # legend items and scale bar, worked out in redraw()
         self.points = {"gNB": None, "UE": None}      # (fx, fy) fractions of the region picture
-        self.template_dir = ""
         self._view = (1.0, 0, 0, 1, 1)               # scale, x offset, y offset, picture w, h
         self._hits = []                              # clickable atlas markers
         self._build_widgets()
@@ -848,7 +848,6 @@ class PlannerApp(QWidget):
         lay.addSpacing(6)
         self.sep_var = self._bold_label("Separation: -")
         lay.addWidget(self.sep_var)
-        lay.addWidget(self._button("Set OAI CONF template folder (optional)", self.choose_template_dir))
         lay.addWidget(self._button("Export gNB + UE configs...", self.export))
         lay.addWidget(self._button("Clear markers", self.clear_points))
 
@@ -1714,12 +1713,6 @@ class PlannerApp(QWidget):
             f"coverage @ {OPTIMAL_GNB_FREQ_GHZ:g} GHz.")
 
     # ---- export --------------------------------------------------------------
-    def choose_template_dir(self):
-        folder = QFileDialog.getExistingDirectory(self, "OAI targets/PROJECTS/GENERIC-NR-5GC/CONF folder")
-        if folder:
-            self.template_dir = folder
-            self._set_status(f"Templates: {folder}")
-
     def export(self):
         if self.mode != "region" or not all(self.points.values()):
             QMessageBox.warning(self, "Not ready", "Open a region and place both the gNB and the UE.")
@@ -1745,7 +1738,7 @@ class PlannerApp(QWidget):
         if not out_dir:
             return
         run_dir = make_run_folder(out_dir, self.region.label)
-        export_configs(run_dir, self.template_dir, g, u, heights["gNB"], heights["UE"], bdem)
+        export_configs(run_dir, TEMPLATE_DIR, g, u, heights["gNB"], heights["UE"], bdem)
         self._set_status(f"Exported to:\n{run_dir}")
 
 
