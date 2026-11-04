@@ -27,8 +27,8 @@ from PIL import Image
 from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QPainter, QPalette, QPen,
                          QPolygonF)
-from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGroupBox,
-                             QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
+from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
+                             QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
                              QVBoxLayout, QWidget)
 
 Image.MAX_IMAGE_PIXELS = None
@@ -583,6 +583,8 @@ def apply_theme(app):
         QWidget#panel {{ background: {t['panel_bg']}; }}
         QWidget#panel QLabel {{ color: {t['text']}; background: transparent; }}
         QLabel#muted {{ color: {t['muted']}; }}
+        QFrame#controls {{ background: {t['panel_bg']}; border: 1px solid {t['border']}; }}
+        QFrame#controls QLabel, QFrame#controls QCheckBox {{ color: {t['text']}; background: transparent; }}
         QGroupBox {{ border: 1px solid {t['border']}; margin-top: 1.3em; font-weight: bold; }}
         QGroupBox QWidget {{ font-weight: normal; }}
         QGroupBox::title {{ subcontrol-origin: margin; left: 8px; color: {t['text']}; }}
@@ -744,10 +746,6 @@ class PlannerApp(QWidget):
         lay.addWidget(self._button("< Back to atlas", self.show_atlas))
         lay.addSpacing(8)
 
-        self.show_inset = self._check("Cross-section inset", self.redraw, checked=True)
-        lay.addWidget(self.show_inset)
-        lay.addSpacing(8)
-
         # one group per node: pick it, then click the map OR type its coordinates
         self.radios, self.lon_vars, self.lat_vars, self.height_vars = {}, {}, {}, {}
         self._entry_owner = {}                       # lon/lat entry -> node it belongs to
@@ -798,18 +796,6 @@ class PlannerApp(QWidget):
         lay.addSpacing(6)
         self.sep_var = self._bold_label("Separation: -")
         lay.addWidget(self.sep_var)
-        self.show_cands = self._check("Show atlas candidate masts", self.redraw,
-                                      enabled=bool(self.candidates))
-        lay.addWidget(self.show_cands)
-
-        self.show_grid = self._check("Show lon/lat grid", self.redraw)
-        lay.addWidget(self.show_grid)
-        self.topo_opacity = TOPO_OPACITY
-        self.show_topo = self._check("Topographic overlay", self.on_topo_toggle)
-        lay.addWidget(self.show_topo)
-        self.show_psr = self._check("Permanently shadowed regions", self.on_psr_toggle)
-        lay.addWidget(self.show_psr)
-
         lay.addWidget(self._button("Set OAI CONF template folder (optional)", self.choose_template_dir))
         lay.addWidget(self._button("Export gNB + UE configs...", self.export))
         lay.addWidget(self._button("Clear markers", self.clear_points))
@@ -823,6 +809,24 @@ class PlannerApp(QWidget):
 
         self.canvas = Canvas(self.paint_map, owner=self)
         outer.addWidget(self.canvas, 1)
+
+        # all overlay controls live in one box in the top-right corner of the map (all on at startup)
+        self.controls = QFrame(self.canvas, objectName="controls")
+        self.controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        box = QVBoxLayout(self.controls)
+        box.setContentsMargins(8, 6, 8, 6)
+        box.setSpacing(2)
+        box.addWidget(self._bold_label("Overlays"))
+        self.topo_opacity = TOPO_OPACITY
+        self.show_cands = self._check("Candidate masts", self.redraw, checked=bool(self.candidates),
+                                      enabled=bool(self.candidates))
+        self.show_grid = self._check("Lon/lat grid", self.redraw, checked=True)
+        self.show_topo = self._check("Topographic overlay", self.on_topo_toggle, checked=True)
+        self.show_psr = self._check("Permanently shadowed regions", self.on_psr_toggle, checked=True)
+        self.show_inset = self._check("Cross-section inset", self.redraw, checked=True)
+        for check in (self.show_cands, self.show_grid, self.show_topo, self.show_psr, self.show_inset):
+            box.addWidget(check)
+        self.controls.adjustSize()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.FocusIn and obj in self._entry_owner:
@@ -921,6 +925,7 @@ class PlannerApp(QWidget):
         """Work out the view (scale, link, background, legend), then repaint the map and minimap."""
         self.mini.update()
         self.canvas.update()
+        self.controls.move(self.canvas.width() - 12 - self.controls.width(), 12)
         if self.raster is None:
             return
         cw, ch = self.canvas.width(), self.canvas.height()
@@ -934,7 +939,7 @@ class PlannerApp(QWidget):
         self._inset_rect = None
         self._link = self._compute_link()
         if self._link:
-            self.sep_var.setText(f"Separation: {self._link_text(self._link)}")
+            self.sep_var.setText(self._sep_readout(self._link))
         self._background(size)
         if self._bg_qkey != self._bg_key:
             self._bg_qimage, self._bg_qkey = pil_to_qimage(self._bg_img), self._bg_key
@@ -993,12 +998,14 @@ class PlannerApp(QWidget):
         key = self.region.stem if self.mode == "region" and self.region else None
         if key not in self._psr_cache:
             path = POLE_PSR if key is None else os.path.join(REGION_DIR, f"{key}__psr.tif")
+            previous = self.status.text()
             self._set_status("Loading shadowed regions...", now=True)
             try:
                 layer = PsrLayer(path) if os.path.exists(path) else None
             except (OSError, ValueError):
                 layer = None
             self._psr_cache[key] = layer
+            self._set_status(previous)
         return self._psr_cache[key]
 
     def _psr_note(self):
@@ -1058,17 +1065,36 @@ class PlannerApp(QWidget):
         else:
             chord = chord_height(dist, float(terrain[0]), gnb_h, float(terrain[-1]), ue_h)
             clearance = float(np.nanmin(chord - terrain))      # NaN (no-data) samples are ignored
-            link.update(chord=chord, clearance=clearance, status="clear" if clearance >= 0 else "blocked")
+            # straight-line (LOS) path length between the antenna tops: ground arc, elevation and mast heights
+            R = BODY_RADIUS_M
+            ra, rb = R + float(terrain[0]) + gnb_h, R + float(terrain[-1]) + ue_h
+            path = math.sqrt((rb - ra) ** 2 + 4 * ra * rb * math.sin(link["sep"] / R / 2) ** 2)
+            link.update(chord=chord, clearance=clearance, path=path,
+                        status="clear" if clearance >= 0 else "blocked")
         return link
 
     def _link_colour(self, link):
         key = {"clear": "los_clear", "blocked": "los_blocked"}.get(link["status"] if link else None, "link")
         return THEME[key]
 
+    @staticmethod
+    def _fmt_dist(d):
+        return f"{d:.1f} m" if d < 1000 else f"{d / 1000:.3f} km"
+
     def _link_text(self, link):
-        d = link["sep"]
-        text = f"{d:.0f} m" if d < 1000 else f"{d / 1000:.2f} km"
+        """Label for the line: the LOS path length (with elevation) when known, else the ground distance."""
+        text = self._fmt_dist(link.get("path", link["sep"]))
         return text + {"clear": " LOS", "blocked": " NLOS"}.get(link["status"], "")
+
+    def _sep_readout(self, link):
+        text = f"Ground separation: {self._fmt_dist(link['sep'])}"
+        if "path" in link:
+            text += f"\nLOS path (with elevation): {self._fmt_dist(link['path'])}"
+        return text
+
+    def _controls_bottom(self):
+        """Bottom edge, in canvas pixels, of the overlay-controls box."""
+        return 12 + self.controls.height()
 
     def _in_inset(self, event):
         r = self._inset_rect
@@ -1101,13 +1127,12 @@ class PlannerApp(QWidget):
         self._inset_size = (w, h)
         if cw < 264 or ch < 184:
             return
-        if self._inset_position is None:
-            x0, y0 = cw - 12 - w, 12
+        if self._inset_position is None:                    # default: top right, just below the overlay controls
+            x0, y0 = cw - 12 - w, self._controls_bottom() + 8
         else:
             x0, y0 = self._inset_position
         x0 = max(12, min(x0, cw - 12 - w))
         y0 = max(12, min(y0, ch - 12 - h))
-        self._inset_position = (x0, y0)
         x1, y1 = x0 + w, y0 + h
         self._inset_rect = (x0, y0, x1, y1)
         self._inset_handle = (x0, y0, x0 + 12, y0 + 12)
@@ -1192,18 +1217,43 @@ class PlannerApp(QWidget):
         return items, scale_bar(self.raster.width * self.raster.dx / (iw * zoom))
 
     def _draw_legend(self, p, items, scale=None):
-        """Legend plate in the bottom-right corner. items: [(kind, colour, text)], kind one of
-        dot / ring / line / dash / box / fill, or None for a plain text line. scale: (bar pixels, label)."""
+        """Legend in the bottom-right corner of the window, and the scale bar directly on the map at
+        the bottom-right of the visible map picture. If the two would overlap, the scale bar moves up
+        above the legend. items: [(kind, colour, text)], kind one of dot / ring / line / dash / box /
+        fill, or None for plain text. scale: (bar pixels, label)."""
         t = THEME
         font = self._font()
+        cw, ch = self.canvas.width(), self.canvas.height()
         row = int(self.font_size * 2.2) + 2
-        steps, boxes = [], []          # drawing steps laid out from (0, 0), and the area each covers
+        legend, bar = ([], []), ([], [])   # (drawing steps laid out from (0, 0), the area each covers)
 
-        def text_at(x, y, text, anchor):
+        def text_at(group, x, y, text, anchor):
             rect = anchored_rect(*self._text_size(font, text), x, y, anchor)
-            boxes.append(rect)
-            steps.append(lambda p: self._draw_text(p, rect, text, t["label_fg"], font))
+            group[1].append(rect)
+            group[0].append(lambda p: self._draw_text(p, rect, text, t["label_fg"], font))
 
+        def bbox(group):
+            boxes = group[1]
+            return (min(b.left() for b in boxes), min(b.top() for b in boxes),
+                    max(b.right() for b in boxes), max(b.bottom() for b in boxes)) if boxes else None
+
+        def settle(group, right, bottom):
+            """Draw `group` with its bottom-right corner at (right, bottom - 6) on a plate, and return
+            the plate rectangle (x1, y1, x2, y2)."""
+            box = bbox(group)
+            if not box:
+                return None
+            dx, dy = right - box[2], bottom - 6 - box[3]
+            plate = (box[0] + dx - 8, box[1] + dy - 6, box[2] + dx + 8, box[3] + dy + 6)
+            draw_rect(p, *plate, fill=t["label_bg"], outline=t["border"])
+            p.save()
+            p.translate(dx, dy)
+            for step in group[0]:
+                step(p)
+            p.restore()
+            return plate
+
+        steps, boxes = legend
         y = 0
         for kind, colour, text in items:
             cy = y + row / 2
@@ -1226,28 +1276,27 @@ class PlannerApp(QWidget):
             elif kind == "fill":
                 boxes.append(QRectF(2, cy - 5, 14, 10))
                 steps.append(lambda p, cy=cy, colour=colour: draw_rect(p, 2, cy - 5, 16, cy + 5, fill=colour))
-            text_at(30 if kind else 2, cy, text, "w")
+            text_at(legend, 30 if kind else 2, cy, text, "w")
             y += row
+        legend_rect = settle(legend, cw - 16, ch - 10)                 # window corner, not tied to the map
+
         if scale:
             length, label = scale
-            y += 6
-            boxes.append(QRectF(-1, y, length + 2, 8))
-            steps.append(lambda p, y=y: (
-                draw_line(p, [(0, y + 4), (length, y + 4)], t["label_fg"], width=2),
-                draw_line(p, [(0, y), (0, y + 8)], t["label_fg"], width=2),
-                draw_line(p, [(length, y), (length, y + 8)], t["label_fg"], width=2)))
-            text_at(length / 2, y + 11, label, "n")
-        if not boxes:
-            return
-        x1, y1 = min(b.left() for b in boxes), min(b.top() for b in boxes)
-        x2, y2 = max(b.right() for b in boxes), max(b.bottom() for b in boxes)
-        dx, dy = self.canvas.width() - 16 - x2, self.canvas.height() - 16 - y2
-        draw_rect(p, x1 + dx - 8, y1 + dy - 8, x2 + dx + 8, y2 + dy + 8, fill=t["label_bg"], outline=t["border"])
-        p.save()
-        p.translate(dx, dy)
-        for step in steps:
-            step(p)
-        p.restore()
+            bar[1].append(QRectF(-1, 0, length + 2, 8))
+            bar[0].append(lambda p: (
+                draw_line(p, [(0, 4), (length, 4)], t["label_fg"], width=2),
+                draw_line(p, [(0, 0), (0, 8)], t["label_fg"], width=2),
+                draw_line(p, [(length, 0), (length, 8)], t["label_fg"], width=2)))
+            text_at(bar, length / 2, 11, label, "n")
+            zoom, ox, oy, iw, ih = self._view
+            right = min(ox + iw * zoom, cw) - 14                       # visible bottom-right corner of the map
+            bottom = min(oy + ih * zoom, ch) - 8
+            sx1, sy1, sx2, sy2 = bbox(bar)
+            w, h = sx2 - sx1 + 16, sy2 - sy1 + 12                      # plate size
+            if legend_rect and right + 8 > legend_rect[0] and right + 8 - w < legend_rect[2] \
+                    and bottom > legend_rect[1] and bottom - h < legend_rect[3]:
+                bottom = legend_rect[1] - 8                              # would overlap: sit just above the legend
+            settle(bar, right, bottom)
 
     def _canvas_xy(self, fx, fy):
         scale, ox, oy, iw, ih = self._view
