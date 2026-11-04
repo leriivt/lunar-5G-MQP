@@ -58,6 +58,8 @@ PSR_OPACITY = 0.5                        # how solid the shadow tint is (0 to 1)
 PSR_THRESHOLD = 0.5                      # for files holding 0..1 values: at or above this = shadowed
 PSR_INVERT = False                       # True if the files mark shadowed areas as 0 instead of 1
 PSR_MAX_PX = 3000                        # PSR pictures are shrunk to at most this many pixels per side
+COVERAGE_MAX_PX = 450                    # UE LOS coverage is worked out on a grid of at most this many cells per side
+COVERAGE_OPACITY = 0.35                  # how solid the LOS coverage tint is (0 to 1)
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m
 MINI_PX = 210                            # size of the atlas minimap in the side panel
 
@@ -101,6 +103,7 @@ THEME = {
     "psr": "#29b6f6",                # tint for permanently shadowed regions
     "link": "#ffeb3b",               # gNB-UE line when line of sight cannot be judged
     "los_clear": "#00e676", "los_blocked": "#ff5252",   # gNB-UE line: line of sight clear / blocked
+    "coverage": "#00e676",           # tint where a UE would have line of sight to the gNB
     "terrain_fill": "#808080", "terrain_line": "#d7ccc8",   # cross-section terrain
 }
 
@@ -290,6 +293,52 @@ def chord_height(dist, z_a, h_a, z_b, h_b):
     e0, e1 = rb * math.sin(theta), rb * math.cos(theta) - ra          # B - A, with A = (0, ra)
     phi = np.asarray(dist, dtype=float) / R
     return (-ra * e0) / (np.sin(phi) * e1 - np.cos(phi) * e0) - R
+
+
+def los_coverage(raster, gnb, gnb_h, ue_h, max_px=COVERAGE_MAX_PX):
+    """Where a UE standing ue_h above the ground would have line of sight to a gNB at map position
+    `gnb` ((fx, fy) fractions) with its antenna gnb_h above the ground. Returns a bool array
+    (True = LOS) on a grid of at most max_px cells per side covering the whole raster, or None if
+    the DEM has no data at the gNB. Rays run from the gNB to every edge cell; along a ray a point is
+    in view when the line to the UE clears every terrain sample before it (Moon curvature included)."""
+    k = max(1, math.ceil(max(raster.width, raster.height) / max_px))
+    W, H = max(2, math.ceil(raster.width / k)), max(2, math.ceil(raster.height / k))
+    rows = np.minimum(((np.arange(H) + 0.5) * raster.height / H).astype(int), raster.height - 1)
+    cols = np.minimum(((np.arange(W) + 0.5) * raster.width / W).astype(int), raster.width - 1)
+    grid = raster.elev[np.ix_(rows, cols)]
+    sx, sy = raster.width * raster.dx / W, raster.height * raster.dy / H        # cell size, metres
+    z0 = float(elevation_profile(raster, gnb, gnb, samples=2)[1][0])
+    if not np.isfinite(z0):
+        return None
+    top = z0 + gnb_h
+    gx, gy = gnb[0] * W, gnb[1] * H                                           # gNB in grid cells
+    xs, ys = np.arange(W) + 0.5, np.arange(H) + 0.5                           # edge cell centres
+    tx = np.concatenate((xs, xs, np.full(H, 0.5), np.full(H, W - 0.5)))
+    ty = np.concatenate((np.full(W, 0.5), np.full(W, H - 0.5), ys, ys))
+    rx, ry = tx - gx, ty - gy
+    t = np.linspace(0.0, 1.0, int(math.ceil(np.hypot(rx, ry).max())) + 2)     # under a cell per step
+    px, py = gx + rx[:, None] * t, gy + ry[:, None] * t
+    d = np.hypot(rx * sx, ry * sy)[:, None] * t                               # ground distance, metres
+    cx, cy = np.clip(px - 0.5, 0, W - 1), np.clip(py - 0.5, 0, H - 1)         # bilinear terrain height
+    x0, y0 = np.minimum(cx.astype(int), W - 2), np.minimum(cy.astype(int), H - 2)
+    fx, fy = cx - x0, cy - y0
+    z = ((1 - fx) * (1 - fy) * grid[y0, x0] + fx * (1 - fy) * grid[y0, x0 + 1]
+         + (1 - fx) * fy * grid[y0 + 1, x0] + fx * fy * grid[y0 + 1, x0 + 1])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        drop = d ** 2 / (2 * BODY_RADIUS_M)                                   # curvature of the Moon
+        terrain = (z - drop - top) / d                                        # slope up to each ground point
+        target = (z + ue_h - drop - top) / d                                  # slope up to a UE antenna there
+    terrain[:, 0] = -np.inf
+    terrain[~np.isfinite(terrain)] = -np.inf                                 # no-data samples never block
+    horizon = np.maximum.accumulate(terrain, axis=1)
+    horizon = np.concatenate((np.full((len(rx), 1), -np.inf), horizon[:, :-1]), axis=1)
+    valid = np.isfinite(z)
+    seen = target >= horizon
+    seen[:, 0] = True
+    cell = (np.clip(py.astype(int), 0, H - 1) * W + np.clip(px.astype(int), 0, W - 1))[valid]
+    total = np.bincount(cell, minlength=W * H)
+    clear = np.bincount(cell, weights=seen[valid], minlength=W * H)
+    return ((clear * 2 >= total) & (total > 0)).reshape(H, W)                # most rays through the cell agree
 
 
 # ----------------------------------------------------------------------------
@@ -685,6 +734,7 @@ class PlannerApp(QWidget):
         self._psr_cache = {}            # view key -> PsrLayer or None
         self._bg_key = self._bg_img = None   # cached map background (map + overlay)
         self._bg_qkey = self._bg_qimage = None   # the same background converted for Qt
+        self._cov_key = self._coverage = None    # UE LOS coverage: (QImage, fraction in view) or None
         self._legend = ([], None)       # legend items and scale bar, worked out in redraw()
         self.points = {"gNB": None, "UE": None}      # (fx, fy) fractions of the region picture
         self.template_dir = ""
@@ -762,6 +812,7 @@ class PlannerApp(QWidget):
             top.addWidget(QLabel("  height (m)"))
             height = QLineEdit(str(GNB_HEIGHT_M if who == "gNB" else UE_HEIGHT_M))
             height.setFixedWidth(self._chars(6))
+            height.textChanged.connect(lambda _text: self.redraw())    # LOS line and coverage follow the heights
             self.height_vars[who] = height
             top.addWidget(height)
             top.addStretch()
@@ -824,7 +875,9 @@ class PlannerApp(QWidget):
         self.show_topo = self._check("Topographic overlay", self.on_topo_toggle, checked=True)
         self.show_psr = self._check("Permanently shadowed regions", self.on_psr_toggle, checked=True)
         self.show_inset = self._check("Cross-section inset", self.redraw, checked=True)
-        for check in (self.show_cands, self.show_grid, self.show_topo, self.show_psr, self.show_inset):
+        self.show_coverage = self._check("UE LOS coverage from gNB", self.redraw, checked=True)
+        for check in (self.show_cands, self.show_grid, self.show_topo, self.show_psr, self.show_inset,
+                      self.show_coverage):
             box.addWidget(check)
         self.controls.adjustSize()
 
@@ -943,6 +996,7 @@ class PlannerApp(QWidget):
         self._background(size)
         if self._bg_qkey != self._bg_key:
             self._bg_qimage, self._bg_qkey = pil_to_qimage(self._bg_img), self._bg_key
+        self._update_coverage()
         self._legend = self._map_legend()
 
     def paint_map(self, p):
@@ -953,6 +1007,12 @@ class PlannerApp(QWidget):
             return
         _, ox, oy, _, _ = self._view
         p.drawImage(QPointF(ox, oy), self._bg_qimage)
+        if self._coverage:
+            scale, _, _, iw, ih = self._view
+            p.save()
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawImage(QRectF(ox, oy, iw * scale, ih * scale), self._coverage[0])
+            p.restore()
         if self.show_grid.isChecked():
             self._draw_grid(p)
         if self.mode == "atlas":
@@ -1012,6 +1072,30 @@ class PlannerApp(QWidget):
         if self.raster is None:
             return ""
         return "" if self._current_psr() else "No permanently shadowed region file (*_psr.tif) found for this view."
+
+    # ---- UE LOS coverage -------------------------------------------------------
+    def _update_coverage(self):
+        """Recompute the UE LOS coverage picture when the gNB, the heights or the map change."""
+        gnb = self.points["gNB"]
+        if self.mode != "region" or gnb is None or not self.show_coverage.isChecked():
+            self._cov_key = self._coverage = None
+            return
+        try:
+            heights = float(self.height_vars["gNB"].text()), float(self.height_vars["UE"].text())
+        except ValueError:
+            self._cov_key = self._coverage = None
+            return
+        key = (id(self.raster), gnb, heights)
+        if key == self._cov_key:
+            return
+        seen = los_coverage(self.raster, gnb, *heights)
+        if seen is None:
+            self._coverage = None
+        else:
+            rgba = np.zeros(seen.shape + (4,), np.uint8)
+            rgba[seen] = [int(THEME["coverage"][i:i + 2], 16) for i in (1, 3, 5)] + [int(255 * COVERAGE_OPACITY)]
+            self._coverage = (pil_to_qimage(Image.fromarray(rgba, "RGBA")), float(seen.mean()))
+        self._cov_key = key
 
     def on_psr_toggle(self):
         if self.show_psr.isChecked():
@@ -1207,6 +1291,8 @@ class PlannerApp(QWidget):
             if self.show_cands.isChecked():
                 items += [("dot", t["cand_ridge"], "Candidate mast (ridge)"),
                           ("dot", t["cand_landing"], "Candidate mast (landing site)")]
+        if self._coverage:
+            items.append(("fill", t["coverage"], f"UE would have LOS to gNB ({self._coverage[1]:.0%} of map)"))
         if self.show_psr.isChecked() and self._current_psr():
             items.append(("fill", t["psr"], "Permanently shadowed region"))
         if self.show_topo.isChecked() and self._current_overlay() is not None:
