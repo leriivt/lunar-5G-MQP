@@ -100,6 +100,7 @@ THEME = {
     "gnb": "#c62828", "ue": "#1565c0",                  # gNB / UE markers and panel headings
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
     "grid": "#000000", "grid_label": "#b2ebf2", #81eb88
+    "scale": "#000000",              # map scale bar and its label (drawn straight on the map, no plate)
     "psr": "#29b6f6",                # tint for permanently shadowed regions
     "link": "#ffeb3b",               # gNB-UE line when line of sight cannot be judged
     "los_clear": "#00e676", "los_blocked": "#ff5252",   # gNB-UE line: line of sight clear / blocked
@@ -1303,15 +1304,14 @@ class PlannerApp(QWidget):
         return items, scale_bar(self.raster.width * self.raster.dx / (iw * zoom))
 
     def _draw_legend(self, p, items, scale=None):
-        """Legend in the bottom-right corner of the window, and the scale bar directly on the map at
-        the bottom-right of the visible map picture. If the two would overlap, the scale bar moves up
-        above the legend. items: [(kind, colour, text)], kind one of dot / ring / line / dash / box /
-        fill, or None for plain text. scale: (bar pixels, label)."""
+        """Legend in the bottom-right corner of the window, and a plain scale bar (no plate) directly on
+        the map at the bottom-left of the visible map picture. items: [(kind, colour, text)], kind one
+        of dot / ring / line / dash / box / fill, or None for plain text. scale: (bar pixels, label)."""
         t = THEME
         font = self._font()
         cw, ch = self.canvas.width(), self.canvas.height()
         row = int(self.font_size * 2.2) + 2
-        legend, bar = ([], []), ([], [])   # (drawing steps laid out from (0, 0), the area each covers)
+        legend = ([], [])                  # (drawing steps laid out from (0, 0), the area each covers)
 
         def text_at(group, x, y, text, anchor):
             rect = anchored_rect(*self._text_size(font, text), x, y, anchor)
@@ -1364,25 +1364,18 @@ class PlannerApp(QWidget):
                 steps.append(lambda p, cy=cy, colour=colour: draw_rect(p, 2, cy - 5, 16, cy + 5, fill=colour))
             text_at(legend, 30 if kind else 2, cy, text, "w")
             y += row
-        legend_rect = settle(legend, cw - 16, ch - 10)                 # window corner, not tied to the map
+        settle(legend, cw - 16, ch - 10)                               # window corner, not tied to the map
 
         if scale:
             length, label = scale
-            bar[1].append(QRectF(-1, 0, length + 2, 8))
-            bar[0].append(lambda p: (
-                draw_line(p, [(0, 4), (length, 4)], t["label_fg"], width=2),
-                draw_line(p, [(0, 0), (0, 8)], t["label_fg"], width=2),
-                draw_line(p, [(length, 0), (length, 8)], t["label_fg"], width=2)))
-            text_at(bar, length / 2, 11, label, "n")
             zoom, ox, oy, iw, ih = self._view
-            right = min(ox + iw * zoom, cw) - 14                       # visible bottom-right corner of the map
-            bottom = min(oy + ih * zoom, ch) - 8
-            sx1, sy1, sx2, sy2 = bbox(bar)
-            w, h = sx2 - sx1 + 16, sy2 - sy1 + 12                      # plate size
-            if legend_rect and right + 8 > legend_rect[0] and right + 8 - w < legend_rect[2] \
-                    and bottom > legend_rect[1] and bottom - h < legend_rect[3]:
-                bottom = legend_rect[1] - 8                              # would overlap: sit just above the legend
-            settle(bar, right, bottom)
+            text_w, text_h = self._text_size(font, label)
+            left = max(ox, 0) + 16                                     # visible bottom-left corner of the map
+            y = min(oy + ih * zoom, ch) - 14 - text_h - 11             # top of the end ticks
+            draw_line(p, [(left, y + 4), (left + length, y + 4)], t["scale"], width=2)
+            for x in (left, left + length):
+                draw_line(p, [(x, y), (x, y + 8)], t["scale"], width=2)
+            self._text(p, left + length / 2, y + 11, label, t["scale"], "n")
 
     def _canvas_xy(self, fx, fy):
         scale, ox, oy, iw, ih = self._view
