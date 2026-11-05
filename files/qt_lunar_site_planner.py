@@ -27,8 +27,8 @@ from PIL import Image
 from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QPainter, QPalette, QPen,
                          QPolygonF)
-from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGroupBox,
-                             QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
+from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
+                             QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
                              QVBoxLayout, QWidget)
 
 Image.MAX_IMAGE_PIXELS = None
@@ -47,6 +47,7 @@ SITES_CSV = os.path.join(APP_DIR, "sites.csv")                           # id,na
 TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # your .bdem files
 POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific .bdem
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
+TEMPLATE_DIR = os.path.join(APP_DIR, "Templates")                       # OAI gNB/UE .conf templates filled on export
 # Topographic overlays: transparent *_topo_hq.png files, searched in these folders in order
 TOPO_POLE_FOLDERS = [ATLAS_DIR, BUNDLE_DIR]
 TOPO_REGION_FOLDERS = [REGION_DIR, os.path.join(BUNDLE_DIR, "regions"), ATLAS_DIR]
@@ -58,6 +59,8 @@ PSR_OPACITY = 0.5                        # how solid the shadow tint is (0 to 1)
 PSR_THRESHOLD = 0.5                      # for files holding 0..1 values: at or above this = shadowed
 PSR_INVERT = False                       # True if the files mark shadowed areas as 0 instead of 1
 PSR_MAX_PX = 3000                        # PSR pictures are shrunk to at most this many pixels per side
+COVERAGE_MAX_PX = 450                    # UE LOS coverage is worked out on a grid of at most this many cells per side
+COVERAGE_OPACITY = 0.35                  # how solid the LOS coverage tint is (0 to 1)
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m
 MINI_PX = 210                            # size of the atlas minimap in the side panel
 
@@ -98,9 +101,11 @@ THEME = {
     "gnb": "#c62828", "ue": "#1565c0",                  # gNB / UE markers and panel headings
     "cand_ridge": "#F9A034", "cand_landing": "#0BF862",  # candidate mast overlay
     "grid": "#000000", "grid_label": "#b2ebf2", #81eb88
+    "scale": "#000000",              # map scale bar and its label (drawn straight on the map, no plate)
     "psr": "#29b6f6",                # tint for permanently shadowed regions
     "link": "#ffeb3b",               # gNB-UE line when line of sight cannot be judged
     "los_clear": "#00e676", "los_blocked": "#ff5252",   # gNB-UE line: line of sight clear / blocked
+    "coverage": "#00e676",           # tint where a UE would have line of sight to the gNB
     "terrain_fill": "#808080", "terrain_line": "#d7ccc8",   # cross-section terrain
 }
 
@@ -290,6 +295,52 @@ def chord_height(dist, z_a, h_a, z_b, h_b):
     e0, e1 = rb * math.sin(theta), rb * math.cos(theta) - ra          # B - A, with A = (0, ra)
     phi = np.asarray(dist, dtype=float) / R
     return (-ra * e0) / (np.sin(phi) * e1 - np.cos(phi) * e0) - R
+
+
+def los_coverage(raster, gnb, gnb_h, ue_h, max_px=COVERAGE_MAX_PX):
+    """Where a UE standing ue_h above the ground would have line of sight to a gNB at map position
+    `gnb` ((fx, fy) fractions) with its antenna gnb_h above the ground. Returns a bool array
+    (True = LOS) on a grid of at most max_px cells per side covering the whole raster, or None if
+    the DEM has no data at the gNB. Rays run from the gNB to every edge cell; along a ray a point is
+    in view when the line to the UE clears every terrain sample before it (Moon curvature included)."""
+    k = max(1, math.ceil(max(raster.width, raster.height) / max_px))
+    W, H = max(2, math.ceil(raster.width / k)), max(2, math.ceil(raster.height / k))
+    rows = np.minimum(((np.arange(H) + 0.5) * raster.height / H).astype(int), raster.height - 1)
+    cols = np.minimum(((np.arange(W) + 0.5) * raster.width / W).astype(int), raster.width - 1)
+    grid = raster.elev[np.ix_(rows, cols)]
+    sx, sy = raster.width * raster.dx / W, raster.height * raster.dy / H        # cell size, metres
+    z0 = float(elevation_profile(raster, gnb, gnb, samples=2)[1][0])
+    if not np.isfinite(z0):
+        return None
+    top = z0 + gnb_h
+    gx, gy = gnb[0] * W, gnb[1] * H                                           # gNB in grid cells
+    xs, ys = np.arange(W) + 0.5, np.arange(H) + 0.5                           # edge cell centres
+    tx = np.concatenate((xs, xs, np.full(H, 0.5), np.full(H, W - 0.5)))
+    ty = np.concatenate((np.full(W, 0.5), np.full(W, H - 0.5), ys, ys))
+    rx, ry = tx - gx, ty - gy
+    t = np.linspace(0.0, 1.0, int(math.ceil(np.hypot(rx, ry).max())) + 2)     # under a cell per step
+    px, py = gx + rx[:, None] * t, gy + ry[:, None] * t
+    d = np.hypot(rx * sx, ry * sy)[:, None] * t                               # ground distance, metres
+    cx, cy = np.clip(px - 0.5, 0, W - 1), np.clip(py - 0.5, 0, H - 1)         # bilinear terrain height
+    x0, y0 = np.minimum(cx.astype(int), W - 2), np.minimum(cy.astype(int), H - 2)
+    fx, fy = cx - x0, cy - y0
+    z = ((1 - fx) * (1 - fy) * grid[y0, x0] + fx * (1 - fy) * grid[y0, x0 + 1]
+         + (1 - fx) * fy * grid[y0 + 1, x0] + fx * fy * grid[y0 + 1, x0 + 1])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        drop = d ** 2 / (2 * BODY_RADIUS_M)                                   # curvature of the Moon
+        terrain = (z - drop - top) / d                                        # slope up to each ground point
+        target = (z + ue_h - drop - top) / d                                  # slope up to a UE antenna there
+    terrain[:, 0] = -np.inf
+    terrain[~np.isfinite(terrain)] = -np.inf                                 # no-data samples never block
+    horizon = np.maximum.accumulate(terrain, axis=1)
+    horizon = np.concatenate((np.full((len(rx), 1), -np.inf), horizon[:, :-1]), axis=1)
+    valid = np.isfinite(z)
+    seen = target >= horizon
+    seen[:, 0] = True
+    cell = (np.clip(py.astype(int), 0, H - 1) * W + np.clip(px.astype(int), 0, W - 1))[valid]
+    total = np.bincount(cell, minlength=W * H)
+    clear = np.bincount(cell, weights=seen[valid], minlength=W * H)
+    return ((clear * 2 >= total) & (total > 0)).reshape(H, W)                # most rays through the cell agree
 
 
 # ----------------------------------------------------------------------------
@@ -583,6 +634,8 @@ def apply_theme(app):
         QWidget#panel {{ background: {t['panel_bg']}; }}
         QWidget#panel QLabel {{ color: {t['text']}; background: transparent; }}
         QLabel#muted {{ color: {t['muted']}; }}
+        QFrame#controls {{ background: {t['panel_bg']}; border: 1px solid {t['border']}; }}
+        QFrame#controls QLabel, QFrame#controls QCheckBox {{ color: {t['text']}; background: transparent; }}
         QGroupBox {{ border: 1px solid {t['border']}; margin-top: 1.3em; font-weight: bold; }}
         QGroupBox QWidget {{ font-weight: normal; }}
         QGroupBox::title {{ subcontrol-origin: margin; left: 8px; color: {t['text']}; }}
@@ -683,9 +736,9 @@ class PlannerApp(QWidget):
         self._psr_cache = {}            # view key -> PsrLayer or None
         self._bg_key = self._bg_img = None   # cached map background (map + overlay)
         self._bg_qkey = self._bg_qimage = None   # the same background converted for Qt
+        self._cov_key = self._coverage = None    # UE LOS coverage: (QImage, fraction in view) or None
         self._legend = ([], None)       # legend items and scale bar, worked out in redraw()
         self.points = {"gNB": None, "UE": None}      # (fx, fy) fractions of the region picture
-        self.template_dir = ""
         self._view = (1.0, 0, 0, 1, 1)               # scale, x offset, y offset, picture w, h
         self._hits = []                              # clickable atlas markers
         self._build_widgets()
@@ -744,10 +797,6 @@ class PlannerApp(QWidget):
         lay.addWidget(self._button("< Back to atlas", self.show_atlas))
         lay.addSpacing(8)
 
-        self.show_inset = self._check("Cross-section inset", self.redraw, checked=True)
-        lay.addWidget(self.show_inset)
-        lay.addSpacing(8)
-
         # one group per node: pick it, then click the map OR type its coordinates
         self.radios, self.lon_vars, self.lat_vars, self.height_vars = {}, {}, {}, {}
         self._entry_owner = {}                       # lon/lat entry -> node it belongs to
@@ -764,6 +813,7 @@ class PlannerApp(QWidget):
             top.addWidget(QLabel("  height (m)"))
             height = QLineEdit(str(GNB_HEIGHT_M if who == "gNB" else UE_HEIGHT_M))
             height.setFixedWidth(self._chars(6))
+            height.textChanged.connect(lambda _text: self.redraw())    # LOS line and coverage follow the heights
             self.height_vars[who] = height
             top.addWidget(height)
             top.addStretch()
@@ -798,19 +848,6 @@ class PlannerApp(QWidget):
         lay.addSpacing(6)
         self.sep_var = self._bold_label("Separation: -")
         lay.addWidget(self.sep_var)
-        self.show_cands = self._check("Show atlas candidate masts", self.redraw,
-                                      enabled=bool(self.candidates))
-        lay.addWidget(self.show_cands)
-
-        self.show_grid = self._check("Show lon/lat grid", self.redraw)
-        lay.addWidget(self.show_grid)
-        self.topo_opacity = TOPO_OPACITY
-        self.show_topo = self._check("Topographic overlay", self.on_topo_toggle)
-        lay.addWidget(self.show_topo)
-        self.show_psr = self._check("Permanently shadowed regions", self.on_psr_toggle)
-        lay.addWidget(self.show_psr)
-
-        lay.addWidget(self._button("Set OAI CONF template folder (optional)", self.choose_template_dir))
         lay.addWidget(self._button("Export gNB + UE configs...", self.export))
         lay.addWidget(self._button("Clear markers", self.clear_points))
 
@@ -823,6 +860,26 @@ class PlannerApp(QWidget):
 
         self.canvas = Canvas(self.paint_map, owner=self)
         outer.addWidget(self.canvas, 1)
+
+        # all overlay controls live in one box in the top-right corner of the map (all on at startup)
+        self.controls = QFrame(self.canvas, objectName="controls")
+        self.controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        box = QVBoxLayout(self.controls)
+        box.setContentsMargins(8, 6, 8, 6)
+        box.setSpacing(2)
+        box.addWidget(self._bold_label("Overlays"))
+        self.topo_opacity = TOPO_OPACITY
+        self.show_cands = self._check("Candidate masts", self.redraw, checked=bool(self.candidates),
+                                      enabled=bool(self.candidates))
+        self.show_grid = self._check("Lon/lat grid", self.redraw, checked=True)
+        self.show_topo = self._check("Topographic overlay", self.on_topo_toggle, checked=True)
+        self.show_psr = self._check("Permanently shadowed regions", self.on_psr_toggle, checked=True)
+        self.show_inset = self._check("Cross-section inset", self.redraw, checked=True)
+        self.show_coverage = self._check("UE LOS coverage from gNB", self.redraw, checked=True)
+        for check in (self.show_cands, self.show_grid, self.show_topo, self.show_psr, self.show_inset,
+                      self.show_coverage):
+            box.addWidget(check)
+        self.controls.adjustSize()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.FocusIn and obj in self._entry_owner:
@@ -921,6 +978,7 @@ class PlannerApp(QWidget):
         """Work out the view (scale, link, background, legend), then repaint the map and minimap."""
         self.mini.update()
         self.canvas.update()
+        self.controls.move(self.canvas.width() - 12 - self.controls.width(), 12)
         if self.raster is None:
             return
         cw, ch = self.canvas.width(), self.canvas.height()
@@ -934,10 +992,11 @@ class PlannerApp(QWidget):
         self._inset_rect = None
         self._link = self._compute_link()
         if self._link:
-            self.sep_var.setText(f"Separation: {self._link_text(self._link)}")
+            self.sep_var.setText(self._sep_readout(self._link))
         self._background(size)
         if self._bg_qkey != self._bg_key:
             self._bg_qimage, self._bg_qkey = pil_to_qimage(self._bg_img), self._bg_key
+        self._update_coverage()
         self._legend = self._map_legend()
 
     def paint_map(self, p):
@@ -948,6 +1007,12 @@ class PlannerApp(QWidget):
             return
         _, ox, oy, _, _ = self._view
         p.drawImage(QPointF(ox, oy), self._bg_qimage)
+        if self._coverage:
+            scale, _, _, iw, ih = self._view
+            p.save()
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawImage(QRectF(ox, oy, iw * scale, ih * scale), self._coverage[0])
+            p.restore()
         if self.show_grid.isChecked():
             self._draw_grid(p)
         if self.mode == "atlas":
@@ -993,18 +1058,44 @@ class PlannerApp(QWidget):
         key = self.region.stem if self.mode == "region" and self.region else None
         if key not in self._psr_cache:
             path = POLE_PSR if key is None else os.path.join(REGION_DIR, f"{key}__psr.tif")
+            previous = self.status.text()
             self._set_status("Loading shadowed regions...", now=True)
             try:
                 layer = PsrLayer(path) if os.path.exists(path) else None
             except (OSError, ValueError):
                 layer = None
             self._psr_cache[key] = layer
+            self._set_status(previous)
         return self._psr_cache[key]
 
     def _psr_note(self):
         if self.raster is None:
             return ""
         return "" if self._current_psr() else "No permanently shadowed region file (*_psr.tif) found for this view."
+
+    # ---- UE LOS coverage -------------------------------------------------------
+    def _update_coverage(self):
+        """Recompute the UE LOS coverage picture when the gNB, the heights or the map change."""
+        gnb = self.points["gNB"]
+        if self.mode != "region" or gnb is None or not self.show_coverage.isChecked():
+            self._cov_key = self._coverage = None
+            return
+        try:
+            heights = float(self.height_vars["gNB"].text()), float(self.height_vars["UE"].text())
+        except ValueError:
+            self._cov_key = self._coverage = None
+            return
+        key = (id(self.raster), gnb, heights)
+        if key == self._cov_key:
+            return
+        seen = los_coverage(self.raster, gnb, *heights)
+        if seen is None:
+            self._coverage = None
+        else:
+            rgba = np.zeros(seen.shape + (4,), np.uint8)
+            rgba[seen] = [int(THEME["coverage"][i:i + 2], 16) for i in (1, 3, 5)] + [int(255 * COVERAGE_OPACITY)]
+            self._coverage = (pil_to_qimage(Image.fromarray(rgba, "RGBA")), float(seen.mean()))
+        self._cov_key = key
 
     def on_psr_toggle(self):
         if self.show_psr.isChecked():
@@ -1058,17 +1149,36 @@ class PlannerApp(QWidget):
         else:
             chord = chord_height(dist, float(terrain[0]), gnb_h, float(terrain[-1]), ue_h)
             clearance = float(np.nanmin(chord - terrain))      # NaN (no-data) samples are ignored
-            link.update(chord=chord, clearance=clearance, status="clear" if clearance >= 0 else "blocked")
+            # straight-line (LOS) path length between the antenna tops: ground arc, elevation and mast heights
+            R = BODY_RADIUS_M
+            ra, rb = R + float(terrain[0]) + gnb_h, R + float(terrain[-1]) + ue_h
+            path = math.sqrt((rb - ra) ** 2 + 4 * ra * rb * math.sin(link["sep"] / R / 2) ** 2)
+            link.update(chord=chord, clearance=clearance, path=path,
+                        status="clear" if clearance >= 0 else "blocked")
         return link
 
     def _link_colour(self, link):
         key = {"clear": "los_clear", "blocked": "los_blocked"}.get(link["status"] if link else None, "link")
         return THEME[key]
 
+    @staticmethod
+    def _fmt_dist(d):
+        return f"{d:.1f} m" if d < 1000 else f"{d / 1000:.3f} km"
+
     def _link_text(self, link):
-        d = link["sep"]
-        text = f"{d:.0f} m" if d < 1000 else f"{d / 1000:.2f} km"
+        """Label for the line: the LOS path length (with elevation) when known, else the ground distance."""
+        text = self._fmt_dist(link.get("path", link["sep"]))
         return text + {"clear": " LOS", "blocked": " NLOS"}.get(link["status"], "")
+
+    def _sep_readout(self, link):
+        text = f"Ground separation: {self._fmt_dist(link['sep'])}"
+        if "path" in link:
+            text += f"\nLOS path (with elevation): {self._fmt_dist(link['path'])}"
+        return text
+
+    def _controls_bottom(self):
+        """Bottom edge, in canvas pixels, of the overlay-controls box."""
+        return 12 + self.controls.height()
 
     def _in_inset(self, event):
         r = self._inset_rect
@@ -1101,13 +1211,12 @@ class PlannerApp(QWidget):
         self._inset_size = (w, h)
         if cw < 264 or ch < 184:
             return
-        if self._inset_position is None:
-            x0, y0 = cw - 12 - w, 12
+        if self._inset_position is None:                    # default: top right, just below the overlay controls
+            x0, y0 = cw - 12 - w, self._controls_bottom() + 8
         else:
             x0, y0 = self._inset_position
         x0 = max(12, min(x0, cw - 12 - w))
         y0 = max(12, min(y0, ch - 12 - h))
-        self._inset_position = (x0, y0)
         x1, y1 = x0 + w, y0 + h
         self._inset_rect = (x0, y0, x1, y1)
         self._inset_handle = (x0, y0, x0 + 12, y0 + 12)
@@ -1182,6 +1291,8 @@ class PlannerApp(QWidget):
             if self.show_cands.isChecked():
                 items += [("dot", t["cand_ridge"], "Candidate mast (ridge)"),
                           ("dot", t["cand_landing"], "Candidate mast (landing site)")]
+        if self._coverage:
+            items.append(("fill", t["coverage"], f"UE would have LOS to gNB ({self._coverage[1]:.0%} of map)"))
         if self.show_psr.isChecked() and self._current_psr():
             items.append(("fill", t["psr"], "Permanently shadowed region"))
         if self.show_topo.isChecked() and self._current_overlay() is not None:
@@ -1192,18 +1303,42 @@ class PlannerApp(QWidget):
         return items, scale_bar(self.raster.width * self.raster.dx / (iw * zoom))
 
     def _draw_legend(self, p, items, scale=None):
-        """Legend plate in the bottom-right corner. items: [(kind, colour, text)], kind one of
-        dot / ring / line / dash / box / fill, or None for a plain text line. scale: (bar pixels, label)."""
+        """Legend in the bottom-right corner of the window, and a plain scale bar (no plate) directly on
+        the map at the bottom-left of the visible map picture. items: [(kind, colour, text)], kind one
+        of dot / ring / line / dash / box / fill, or None for plain text. scale: (bar pixels, label)."""
         t = THEME
         font = self._font()
+        cw, ch = self.canvas.width(), self.canvas.height()
         row = int(self.font_size * 2.2) + 2
-        steps, boxes = [], []          # drawing steps laid out from (0, 0), and the area each covers
+        legend = ([], [])                  # (drawing steps laid out from (0, 0), the area each covers)
 
-        def text_at(x, y, text, anchor):
+        def text_at(group, x, y, text, anchor):
             rect = anchored_rect(*self._text_size(font, text), x, y, anchor)
-            boxes.append(rect)
-            steps.append(lambda p: self._draw_text(p, rect, text, t["label_fg"], font))
+            group[1].append(rect)
+            group[0].append(lambda p: self._draw_text(p, rect, text, t["label_fg"], font))
 
+        def bbox(group):
+            boxes = group[1]
+            return (min(b.left() for b in boxes), min(b.top() for b in boxes),
+                    max(b.right() for b in boxes), max(b.bottom() for b in boxes)) if boxes else None
+
+        def settle(group, right, bottom):
+            """Draw `group` with its bottom-right corner at (right, bottom - 6) on a plate, and return
+            the plate rectangle (x1, y1, x2, y2)."""
+            box = bbox(group)
+            if not box:
+                return None
+            dx, dy = right - box[2], bottom - 6 - box[3]
+            plate = (box[0] + dx - 8, box[1] + dy - 6, box[2] + dx + 8, box[3] + dy + 6)
+            draw_rect(p, *plate, fill=t["label_bg"], outline=t["border"])
+            p.save()
+            p.translate(dx, dy)
+            for step in group[0]:
+                step(p)
+            p.restore()
+            return plate
+
+        steps, boxes = legend
         y = 0
         for kind, colour, text in items:
             cy = y + row / 2
@@ -1226,28 +1361,20 @@ class PlannerApp(QWidget):
             elif kind == "fill":
                 boxes.append(QRectF(2, cy - 5, 14, 10))
                 steps.append(lambda p, cy=cy, colour=colour: draw_rect(p, 2, cy - 5, 16, cy + 5, fill=colour))
-            text_at(30 if kind else 2, cy, text, "w")
+            text_at(legend, 30 if kind else 2, cy, text, "w")
             y += row
+        settle(legend, cw - 16, ch - 10)                               # window corner, not tied to the map
+
         if scale:
             length, label = scale
-            y += 6
-            boxes.append(QRectF(-1, y, length + 2, 8))
-            steps.append(lambda p, y=y: (
-                draw_line(p, [(0, y + 4), (length, y + 4)], t["label_fg"], width=2),
-                draw_line(p, [(0, y), (0, y + 8)], t["label_fg"], width=2),
-                draw_line(p, [(length, y), (length, y + 8)], t["label_fg"], width=2)))
-            text_at(length / 2, y + 11, label, "n")
-        if not boxes:
-            return
-        x1, y1 = min(b.left() for b in boxes), min(b.top() for b in boxes)
-        x2, y2 = max(b.right() for b in boxes), max(b.bottom() for b in boxes)
-        dx, dy = self.canvas.width() - 16 - x2, self.canvas.height() - 16 - y2
-        draw_rect(p, x1 + dx - 8, y1 + dy - 8, x2 + dx + 8, y2 + dy + 8, fill=t["label_bg"], outline=t["border"])
-        p.save()
-        p.translate(dx, dy)
-        for step in steps:
-            step(p)
-        p.restore()
+            zoom, ox, oy, iw, ih = self._view
+            text_w, text_h = self._text_size(font, label)
+            left = max(ox, 0) + 16                                     # visible bottom-left corner of the map
+            y = min(oy + ih * zoom, ch) - 14 - text_h - 11             # top of the end ticks
+            draw_line(p, [(left, y + 4), (left + length, y + 4)], t["scale"], width=2)
+            for x in (left, left + length):
+                draw_line(p, [(x, y), (x, y + 8)], t["scale"], width=2)
+            self._text(p, left + length / 2, y + 11, label, t["scale"], "n")
 
     def _canvas_xy(self, fx, fy):
         scale, ox, oy, iw, ih = self._view
@@ -1586,12 +1713,6 @@ class PlannerApp(QWidget):
             f"coverage @ {OPTIMAL_GNB_FREQ_GHZ:g} GHz.")
 
     # ---- export --------------------------------------------------------------
-    def choose_template_dir(self):
-        folder = QFileDialog.getExistingDirectory(self, "OAI targets/PROJECTS/GENERIC-NR-5GC/CONF folder")
-        if folder:
-            self.template_dir = folder
-            self._set_status(f"Templates: {folder}")
-
     def export(self):
         if self.mode != "region" or not all(self.points.values()):
             QMessageBox.warning(self, "Not ready", "Open a region and place both the gNB and the UE.")
@@ -1617,7 +1738,7 @@ class PlannerApp(QWidget):
         if not out_dir:
             return
         run_dir = make_run_folder(out_dir, self.region.label)
-        export_configs(run_dir, self.template_dir, g, u, heights["gNB"], heights["UE"], bdem)
+        export_configs(run_dir, TEMPLATE_DIR, g, u, heights["gNB"], heights["UE"], bdem)
         self._set_status(f"Exported to:\n{run_dir}")
 
 
