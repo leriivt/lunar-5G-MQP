@@ -1,0 +1,109 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+ subgraph DATA["1. External Files & Datasets"]
+        SITES_CSV["sites.csv<br>(Site Catalog)"]
+        CANDS_CSV["candidates_freeze.csv<br>(Candidate Masts)"]
+        DEFAULTS_CSV["gnb_defaults.csv<br>(Saved Defaults)"]
+        GEOTIFF["GeoTIFF Elevation DEMs<br>(pole and regional)"]
+        PSRTIFF["PSR Tiffs"]
+        BDEM[".bdem Files<br>(Moon Terrain Models)"]
+        TEMPLATES["OAI .conf Templates<br>(gnb.sa.band78... &amp; ue.bictr)"]
+        TOPO["Topological PNGs"]
+  end
+ subgraph PROJ["A. Projection & Math Engine"]
+        XY_LONLAT["Convert<br>xy &lt;-&gt; lonlat"]
+        XY_FRACT["Convert<br>xy &lt;-&gt; Fractional Image Coordinate"]
+        DIST_M["Point to Point Distance"]
+        GRID_MATH["Grid Step Size Calculation"]
+  end
+ subgraph IMGLAYER["Image Layers"]
+        LOADPSR["Load and Resize PSR Data"]
+        LOADTOPO["Load and Resize Topographic PNG"]
+  end
+ subgraph READGEO["Read GeoTIFF"]
+        META["Read/store Geospatial Metadata"]
+        RAW["Read/store Raw Elevation Data"]
+  end
+ subgraph RAST["B. Raster & Physics Engine"]
+        READGEO
+        SHADE["Hillshading Generation"]
+        ELEV_PROF["Generate 2D Cross-Sectional Elevation Profile"]
+        CHORD["Calculate Chord Height"]
+        LOS_COV["Generate LoS Coverage Area"]
+  end
+ subgraph CAT["C. Catalog & Data Management"]
+        LOAD_CAT["Parse Sites &amp; Check Region DEM Availability"]
+        LOAD_CAND["Parses Candidate Ridge/Landing Mast Coordinates"]
+        GNB_DEF["Read/Write Region gNB Presets"]
+  end
+ subgraph EXP["D. Export Engine"]
+        FILL_BLOCK["Build Config File"]
+        RUN_FOLD["Export Config Files to Directory"]
+  end
+ subgraph CORE["2. Core Engine (Headless Math & Logic)"]
+    direction TB
+        PROJ
+        IMGLAYER
+        RAST
+        CAT
+        EXP
+  end
+ subgraph WIN["A. Main Window Controller (PlannerApp)"]
+        REGION["Current Region"]
+        MOVE_MODE["Move gnB/UE Mode"]
+        GNB_UE["Current gNB/UE location"]
+  end
+ subgraph PANEL["B. Side Control Panel"]
+        COMBO["Region Selection Dropdown"]
+        INPUTS["Enter Coordinates & Mast Height"]
+        BTNS["Buttons: Place, Optimal gNB, Save Default, Export"]
+  end
+ subgraph CANVAS["C. Interactive Map Canvas (QPainter)"]
+        PAINT_MAP["Render Hill shaded DEM"]
+        PAINT_NODES["Renders gNB/UE Markers &amp; Distance Line"]
+        PAINT_LAYERS["Render additional overlays on top of Hillshade"]
+        PAINT_INSET["Render Dynamic Cross-Section Window"]
+  end
+ subgraph EVENTS["D. Event Handlers"]
+        CLICK_EV["Detect Map Click"]
+        ZOOM_EV["Zoom In and Out"]
+        EXPORT_EV["export()<br>(Triggers File Dialog &amp; Validation)"]
+  end
+ subgraph GUI["3. GUI Layer (PyQt6 Interface & Presentation)"]
+    direction TB
+        WIN
+        PANEL
+        CANVAS
+        EVENTS
+  end
+ subgraph OUT["4. Output Deliverables"]
+        RUN_DIR["Timestamped Export Directory<br>(e.g., Haworth_2026-11-05_12-00-00/)"]
+        GNB_OUT["gnb.sa.band78...bictr.conf"]
+        UE_OUT["ue.bictr.conf"]
+  end
+    TOPO --> LOADTOPO
+    PAINT_MAP --> PAINT_LAYERS
+    LOADPSR --> PAINT_LAYERS & PAINT_LAYERS
+    LOADTOPO --> PAINT_LAYERS
+    SITES_CSV --> LOAD_CAT
+    CANDS_CSV --> LOAD_CAND
+    DEFAULTS_CSV --> GNB_DEF
+    GEOTIFF --> READGEO
+    BDEM --> EXP
+    TEMPLATES --> EXP
+    PSRTIFF --> LOADPSR
+    GNB_UE --> ELEV_PROF & CHORD & LOS_COV
+    READGEO --> ELEV_PROF & SHADE
+    SHADE --> PAINT_MAP
+    ELEV_PROF --> CHORD & PAINT_INSET
+    CHORD --> PAINT_INSET
+    LOAD_CAT --> COMBO
+    GNB_DEF --> INPUTS
+    BTNS --> EXPORT_EV
+    FILL_BLOCK --> RUN_FOLD
+    RUN_FOLD --> RUN_DIR
+    RUN_DIR --> GNB_OUT & UE_OUT
+    PAINT_LAYERS --> PAINT_NODES

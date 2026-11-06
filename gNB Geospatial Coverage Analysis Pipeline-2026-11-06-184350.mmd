@@ -1,0 +1,98 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+ subgraph INPUTS["1. External Data and Configuration"]
+    direction LR
+        DEM["GeoTIFF DEMs<br>(Pole and Regional)"]
+        PSR["PSR GeoTIFFs"]
+        TOPO["Topographic PNGs"]
+        SITES["sites.csv"]
+        FREEZE["candidates_freeze.csv"]
+        COVERAGE["candidates_coverage.csv"]
+        INDEX["site_tiles_index.csv"]
+        DEFAULTS["gnb_defaults.csv"]
+        BDEM["BICTR .bdem Files"]
+        TEMPLATES["OAI .conf Templates"]
+  end
+ subgraph GUI["2. Graphical User Interface (PyQt6)"]
+    direction TB
+        MAIN["Main Window Controller"]
+        PANEL["Side Panel<br>Region Selection, Inputs,<br>Buttons and Settings"]
+        CANVAS["Interactive Map Canvas<br>(QPainter)"]
+        EVENTS["Mouse and UI Event Handlers<br>Click, Drag, Pan, Zoom"]
+  end
+ subgraph DATA["Data Management"]
+        CATALOG["Catalog Loader<br>Sites and Region Availability"]
+        RASTER["Raster Loading and Caching<br>DEM, PSR and Topography"]
+        CONFIG["Configuration and Defaults"]
+  end
+ subgraph GEO["Geospatial and Image Processing"]
+        PROJECTION["Projection and Coordinate Math<br>Polar Stereographic ↔ Lon/Lat"]
+        COMPOSITE["Map Background Composition<br>Hillshade + PSR + Topography"]
+  end
+ subgraph PLACEMENT["gNB Placement"]
+        OPTIMAL["Optimal gNB Placement<br>optimal_GNB.py"]
+        CANDIDATES["Candidate Mast Data"]
+  end
+ subgraph ANALYSIS["Terrain and Link Analysis"]
+        PROFILE["Terrain Elevation Profile"]
+        DISTANCE["Great-Circle Distance"]
+        LOS["Point-to-Point<br>Line-of-Sight Analysis"]
+        COVERAGE_CALC["Geographic LOS Coverage<br>Calculation"]
+  end
+ subgraph RENDER["Map Rendering"]
+        LAYERS["Map Layers and Overlays<br>Markers, Grid, Link, Coverage"]
+        PAINT["Canvas Rendering"]
+  end
+ subgraph CORE["3. Core Processing Engine"]
+    direction TB
+        DATA
+        GEO
+        PLACEMENT
+        ANALYSIS
+        RENDER
+  end
+ subgraph OUTPUTS["4. Configuration Export"]
+    direction TB
+        VALIDATE["Export Validation<br>gNB and UE Locations,<br>Heights and Region"]
+        EXPORT["Export Configuration Generator"]
+        RUN["Timestamped Output Directory"]
+        GNBCONF["gNB Configuration"]
+        UECONF["UE Configuration"]
+  end
+    MAIN <--> PANEL & CANVAS
+    EVENTS --> MAIN & CANVAS
+    CATALOG --> RASTER
+    RASTER --> COMPOSITE & PROFILE & COVERAGE_CALC
+    PROJECTION --> COMPOSITE & DISTANCE
+    CANDIDATES --> OPTIMAL
+    OPTIMAL --> PROJECTION & MAIN
+    PROFILE --> LOS
+    DISTANCE --> LOS
+    COMPOSITE --> LAYERS
+    LOS --> LAYERS
+    COVERAGE_CALC --> LAYERS
+    LAYERS --> PAINT
+    DEM --> RASTER
+    PSR --> RASTER
+    TOPO --> RASTER
+    SITES --> CATALOG
+    FREEZE --> CATALOG
+    DEFAULTS --> CONFIG
+    CONFIG --> MAIN
+    BDEM --> EXPORT
+    TEMPLATES --> EXPORT
+    COVERAGE L_COVERAGE_CANDIDATES_0@--> CANDIDATES
+    INDEX --> CANDIDATES
+    PANEL --> CATALOG & CONFIG
+    CANVAS --> PROJECTION
+    MAIN --> OPTIMAL & PROFILE & COVERAGE_CALC & VALIDATE & DISTANCE & PROFILE & COVERAGE_CALC
+    PAINT --> CANVAS
+    VALIDATE --> EXPORT
+    EXPORT --> RUN
+    RUN --> GNBCONF & UECONF
+
+
+    L_COVERAGE_CANDIDATES_0@{ curve: linear }
