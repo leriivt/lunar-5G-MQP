@@ -9,6 +9,8 @@ Run:  python3 GUI.py
 """
 import os
 import sys
+import re
+import time
 from pathlib import Path
 from PyQt6.QtCore import QProcess, QTimer
 from PyQt6.QtWidgets import (QApplication, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
@@ -23,15 +25,22 @@ OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
 CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF")
 DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf")
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
-STATS_REFRESH_MS = 100      # how often refresh_stats() should run once implemented
+STATS_REFRESH_MS = 500      # how often refresh_stats() should run once implemented
+NR_MAC_STATS = os.path.join(OAI_BUILD_DIR, "nrMAC_stats.log")  
+NR_L1_STATS = os.path.join(OAI_BUILD_DIR, "nrL1_stats.log")
 
 #TODO Get around sudo issue and modify these bash scripts
 
 SH_DIR = "/home/lunar5g/.local/share/oai-shortcuts"
-UE_MAKE = os.path.join(SH_DIR, "ue-bictr_gui.sh")
-GNB_MAKE = os.path.join(SH_DIR, "gnb-bictr_gui.sh")
+UE_MAKE = os.path.join(SH_DIR, "ue-bictr.sh")
+GNB_MAKE = os.path.join(SH_DIR, "gnb-bictr.sh")
 STOP_ALL = os.path.join(SH_DIR, "stop-all.sh")
 LIVE_STATS = os.path.join(SH_DIR, "stats.sh")
+# "UE 1234: dlsch_rounds 270/31/22/19, dlsch_errors 17, ..."
+DL_RE = re.compile(r"dlsch_rounds ([\d/]+), dlsch_errors (\d+)")
+UL_RE = re.compile(r"ulsch_rounds ([\d/]+), ulsch_DTX \d+, ulsch_errors (\d+)")
+# "ulsch_power[0] 50,0 ulsch_noise_power[0] 30.8" (OAI prints the first value with a comma)
+UL_SNR_RE = re.compile(r"ulsch_power\[0\] (\d+[.,]\d) ulsch_noise_power\[0\] (\d+[.,]\d)")
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -51,7 +60,7 @@ class MainWindow(QMainWindow):
         self.ul_bler = 0 
         self.dl_bler = 0
         self.snr = 0
-
+        self._gnb_start_time = time.time()
     # ---- layout --------------------------------------------------------------
     def _build_widgets(self):
         central = QWidget()
@@ -103,6 +112,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.logs, 1)
 
     def start_timer(self):
+        if self.timer is not None:
+            return  # Timer already running
         self.timer = QTimer()
         self.timer.setInterval(STATS_REFRESH_MS) #set timer interval to check BLER, SNR every 100ms
         self.timer.timeout.connect(self.live_stats)
@@ -155,6 +166,8 @@ class MainWindow(QMainWindow):
             lambda error: self._process_error("gNB", process, error)
         )
         process.start("bash", [GNB_MAKE, self._gnb_conf_path()])
+        self._gnb_start_time = time.time()
+        self.start_timer()  # Start the timer to refresh stats
         self.gnb_status.setText("gNB: Starting")
   
 
@@ -251,16 +264,44 @@ class MainWindow(QMainWindow):
     # ---- 4. BLER / SNR live stats --------------------------------------------
 
     def live_stats(self):
-        # Finds directory where BLER, SNR, HARQ are being calculated and prints those values to stdout
-        #
-        #self.live_path = 
-        #
-        #self.ul_bler = 
-        #self.dl_bler = 
-        #self.snr = 
+        """Parse the gNB's stats dumps and update the lives stats inside"""
+        mac = self._read_stats_file(NR_MAC_STATS)
+        if mac is not None:
+            dl = DL_RE.search(mac)
+            if dl:
+                self.dl_bler = self._bler(*dl.groups())
+                self.stat_labels["DL BLER"].setText(f"{self.dl_bler:.3f}")
+            ul = UL_RE.search(mac)
+            if ul:
+                self.ul_bler = self._bler(*ul.groups())
+                self.stat_labels["UL BLER"].setText(f"{self.ul_bler:.3f}")
+        l1 = self._read_stats_file(NR_L1_STATS)
+        if l1 is not None:
+            m = UL_SNR_RE.search(l1)
+            if m:
+                power, noise = (float(g.replace(",", ".")) for g in m.groups())
+                self.snr = power - noise
+                self.stat_labels["UL SNR (dB)"].setText(f"{self.snr:.1f}")
 
-        pass
 
+
+    def _read_stats_file(self, path):
+        """ return the file's text, or NINE if its missing or left over frim the previous run"""
+        try:
+            if os.path.getmtime(path) < self._gnb_start_time:
+                return None
+            with open(path) as f:
+                return f.read()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _bler(rounds, errors):
+        """residual BLER: blocks still failed after the last HARQ round / first transmissions"""
+        first_tx = int(rounds.split("/")[0])
+        return int(errors) / first_tx if first_tx else 0.0
+
+    
     # ---- shutdown -------------------------------------------------------------
     def closeEvent(self, event):
         if self._closing:
