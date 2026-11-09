@@ -31,6 +31,8 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, Q
                              QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
                              QVBoxLayout, QWidget)
 
+from geo_math import *
+
 Image.MAX_IMAGE_PIXELS = None
 
 # ----------------------------------------------------------------------------
@@ -110,46 +112,7 @@ THEME = {
 }
 
 
-# ----------------------------------------------------------------------------
-# 2. MAP PROJECTION  (south polar stereographic, sphere R, true scale at the pole)
-# ----------------------------------------------------------------------------
-def xy_to_lonlat(x, y):
-    """Projected metres -> (lon, lat) degrees, east-positive longitude."""
-    rho = math.hypot(x, y)
-    return math.degrees(math.atan2(x, y)), -90.0 + math.degrees(2 * math.atan(rho / (2 * BODY_RADIUS_M)))
 
-
-def lonlat_to_xy(lon, lat):
-    rho = 2 * BODY_RADIUS_M * math.tan(math.radians(lat + 90.0) / 2)
-    return rho * math.sin(math.radians(lon)), rho * math.cos(math.radians(lon))
-
-
-def distance_m(a, b):
-    """Great-circle distance between two (lon, lat) points, metres."""
-    lon1, lat1, lon2, lat2 = map(math.radians, (*a, *b))
-    h = (math.sin((lat2 - lat1) / 2) ** 2
-         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
-    return 2 * BODY_RADIUS_M * math.asin(math.sqrt(h))
-
-#helper functions for drawing map projected grid lines
-GRID_STEPS = (0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
-              1, 2, 5, 10, 15, 30, 45)
-
-
-def grid_step(span, target=6):
-    """Smallest 'nice' step that gives at most `target` lines across `span` degrees."""
-    for s in GRID_STEPS:
-        if span / s <= target:
-            return s
-    return GRID_STEPS[-1]
-
-
-def frange(a, b, step):
-    """Multiples of `step` between a and b (inclusive)."""
-    k = math.ceil(a / step - 1e-9)
-    while k * step <= b + 1e-9:
-        yield round(k * step, 9)
-        k += 1
 
 
 def raster_lonlat_extent(raster, n=24):
