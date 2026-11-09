@@ -14,8 +14,8 @@ import math
 
 import numpy as np
 
-#from settings import BODY_RADIUS_M      # package layout: `from .settings import BODY_RADIUS_M`
-BODY_RADIUS_M = 1_737_400.0  
+from settings import BODY_RADIUS_M      # package layout: `from .settings import BODY_RADIUS_M`
+#BODY_RADIUS_M = 1_737_400.0  
 
 # ----------------------------------------------------------------------------
 # Projection  (south polar stereographic, sphere R, true scale at the pole)

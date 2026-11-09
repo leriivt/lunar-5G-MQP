@@ -19,7 +19,7 @@ from PIL import Image
 
 # package layout: use `from .geo_math import ...` and `from .settings import ...`
 from geo_math import curvature_drop, distance_m, xy_to_lonlat
-from qt_lunar_site_planner import (COVERAGE_MAX_PX, DISPLAY_MAX_PX, OVERLAY_MAX_PX, PSR_INVERT, PSR_MAX_PX,
+from settings import (COVERAGE_MAX_PX, DISPLAY_MAX_PX, OVERLAY_MAX_PX, PSR_INVERT, PSR_MAX_PX,
                       PSR_OPACITY, PSR_THRESHOLD, THEME, TOPO_POLE_FOLDERS, TOPO_REGION_FOLDERS)
 
 Image.MAX_IMAGE_PIXELS = None       # the atlas rasters are far larger than Pillow's default limit

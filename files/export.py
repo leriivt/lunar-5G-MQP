@@ -16,7 +16,7 @@ import re
 from datetime import datetime
 
 # package layout: use `from .settings import ...`
-from qt_lunar_site_planner import BLOCK_GNB_SIDE, BLOCK_UE_SIDE, BODY_RADIUS_M, GNB_CONF, UE_CONF
+from settings import BLOCK_GNB_SIDE, BLOCK_UE_SIDE, BODY_RADIUS_M, GNB_CONF, UE_CONF
 
 
 def block_values(tx, rx, tx_h, rx_h, dem_path):

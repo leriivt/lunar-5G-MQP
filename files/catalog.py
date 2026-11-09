@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 # package layout: use `from .settings import ...`
-from qt_lunar_site_planner import (CANDIDATES_CSV, GNB_DEFAULTS_CSV, POLE_BDEM, REGION_ALIASES, REGION_DIR,
+from settings import (CANDIDATES_CSV, GNB_DEFAULTS_CSV, POLE_BDEM, REGION_ALIASES, REGION_DIR,
                       SITES_CSV, TERRAIN_DIR)
 
 
