@@ -2,9 +2,9 @@
 
 Needs: 
     pip install PyQt6
-    pip install sh
+    pip install 
 
-Run:  python3 GUI.py     
+Run:  python3 GUI.py
 
 """
 import os
@@ -22,7 +22,8 @@ from PyQt6.QtWidgets import (QApplication, QFormLayout, QGridLayout, QGroupBox, 
 # ----------------------------------------------------------------------------
 OAI_DIR = "/home/lunar5g/openairinterface5g"
 OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
-CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF")
+#CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF")
+CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF", "RF_SIMULATION")
 DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf")
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
 STATS_REFRESH_MS = 500      # how often refresh_stats() should run once implemented
@@ -31,9 +32,11 @@ NR_L1_STATS = os.path.join(OAI_BUILD_DIR, "nrL1_stats.log")
 
 #TODO Get around sudo issue and modify these bash scripts
 
-SH_DIR = "/home/lunar5g/.local/share/oai-shortcuts"
-UE_MAKE = os.path.join(SH_DIR, "ue-bictr.sh")
-GNB_MAKE = os.path.join(SH_DIR, "gnb-bictr.sh")
+SH_DIR = os.path.join(Path(__file__).parent, ".sh")
+UE_MAKE = os.path.join(SH_DIR, "ue-bictr-gui.sh")
+GNB_MAKE = os.path.join(SH_DIR, "gnb-bictr-gui.sh")
+UE_MAKE_PHY = os.path.join(SH_DIR, "ue-bictr-gui-phy.sh")
+GNB_MAKE_PHY = os.path.join(SH_DIR, "gnb-bictr-gui-phy.sh")
 STOP_ALL = os.path.join(SH_DIR, "stop-all.sh")
 LIVE_STATS = os.path.join(SH_DIR, "stats.sh")
 # "UE 1234: dlsch_rounds 270/31/22/19, dlsch_errors 17, ..."
@@ -41,6 +44,9 @@ DL_RE = re.compile(r"dlsch_rounds ([\d/]+), dlsch_errors (\d+)")
 UL_RE = re.compile(r"ulsch_rounds ([\d/]+), ulsch_DTX \d+, ulsch_errors (\d+)")
 # "ulsch_power[0] 50,0 ulsch_noise_power[0] 30.8" (OAI prints the first value with a comma)
 UL_SNR_RE = re.compile(r"ulsch_power\[0\] (\d+[.,]\d) ulsch_noise_power\[0\] (\d+[.,]\d)")
+
+DEFAULT_SAVE_DIR = os.path.join(Path(__file__).parent, "saved_runs")
+SAVE_DIR = DEFAULT_SAVE_DIR
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -76,6 +82,14 @@ class MainWindow(QMainWindow):
         form.addRow("gNB .conf", self._path_row(self.gnb_conf, self.browse_gnb_config))
         form.addRow("UE .conf", self._path_row(self.ue_conf, self.browse_ue_config))
         layout.addWidget(configs)
+
+        # Run output directory
+        output = QGroupBox("Run output")
+        output_form = QFormLayout(output)
+        self.save_dir_edit = QLineEdit(SAVE_DIR)
+        self.save_dir_edit.setReadOnly(True)
+        output_form.addRow("Save directory", self._path_row(self.save_dir_edit, self.browse_save_dir))
+        layout.addWidget(output)
 
         # Process controls: start/stop buttons and a status label per node
         controls = QGroupBox("Processes")
@@ -119,6 +133,8 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.live_stats)
         self.timer.start()
 
+    
+    
     def _button(self, text, command):
         button = QPushButton(text)
         button.clicked.connect(lambda _checked=False: command())
@@ -150,6 +166,15 @@ class MainWindow(QMainWindow):
         if file_name:
             self.ue_conf.setText(file_name)
         
+    def browse_save_dir(self):
+        """Choose the directory where run summaries are saved."""
+        global SAVE_DIR
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select run save directory", SAVE_DIR
+        )
+        if directory:
+            SAVE_DIR = directory
+            self.save_dir_edit.setText(SAVE_DIR)
 
     # ---- 1. gNB ---------------------------------------------------------------
     def start_gnb(self):
@@ -212,6 +237,7 @@ class MainWindow(QMainWindow):
     def _gnb_finished(self, process):
         if self.p_gnb is process:
             self.gnb_status.setText("gNB: Stopped")
+            self._gnb_end_time = time.time()
 
     def _ue_finished(self, process):
         if self.p_ue is process:
@@ -323,11 +349,26 @@ class MainWindow(QMainWindow):
             self.stopper.kill()
         super().close()
 
+  
     # ---- save runs in file -------------------------------------------------------------
     def save_run(self):
 
-        #save logs, config, everything
-        pass
+        #create special identifier
+        os.makedirs(SAVE_DIR, exist_ok=True)
+        file = os.path.join(SAVE_DIR, f"run_{time.strftime('%Y-%m-%d_%H-%M-%S')}.txt")
+
+        with open(file, "w") as f:
+            f.write(f"Run saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"gNB config: {self._gnb_conf_path()}\n")
+            f.write(f"UE config: {self._ue_conf_path()}\n")
+            f.write(f"DL BLER: {self.dl_bler:.5f}\n")
+            f.write(f"UL BLER: {self.ul_bler:.5f}\n")
+            f.write(f"SNR: {self.snr:.5f} dB\n")
+            f.write(f"run time: {self._gnb_end_time - self._gnb_start_time:.2f} s\n") 
+
+            f.write("Packets sent: \n") #fill in here
+
+
 
 
 def main():
