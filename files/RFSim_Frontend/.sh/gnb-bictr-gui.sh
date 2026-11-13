@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-CONF="${1:-/home/lunar5g/openairinterface5g/targets/PROJECTS/GENERIC-NR-5GC/CONF/gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf}"
+CONF="${1:-/home/lunar5g/openairinterface5g/targets/PROJECTS/GENERIC-NR-5GC/CONF/ue.bictr.conf}"
 [ -f "$CONF" ] || { echo "Config not found: $CONF"; exit 1 ; }
 
 cd /home/lunar5g/openairinterface5g/cmake_targets/ran_build/build || exit 1

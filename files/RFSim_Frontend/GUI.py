@@ -24,7 +24,7 @@ OAI_DIR = "/home/lunar5g/openairinterface5g"
 OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
 #CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF")
 CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF", "RF_SIMULATION")
-DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf")
+DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
 STATS_REFRESH_MS = 500      # how often refresh_stats() should run once implemented
 NR_MAC_STATS = os.path.join(OAI_BUILD_DIR, "nrMAC_stats.log")  
@@ -38,7 +38,7 @@ GNB_MAKE = os.path.join(SH_DIR, "gnb-bictr-gui.sh")
 UE_MAKE_PHY = os.path.join(SH_DIR, "ue-bictr-gui-phy.sh")
 GNB_MAKE_PHY = os.path.join(SH_DIR, "gnb-bictr-gui-phy.sh")
 STOP_ALL = os.path.join(SH_DIR, "stop-all.sh")
-LIVE_STATS = os.path.join(SH_DIR, "stats.sh")
+
 # "UE 1234: dlsch_rounds 270/31/22/19, dlsch_errors 17, ..."
 DL_RE = re.compile(r"dlsch_rounds ([\d/]+), dlsch_errors (\d+)")
 UL_RE = re.compile(r"ulsch_rounds ([\d/]+), ulsch_DTX \d+, ulsch_errors (\d+)")
@@ -67,6 +67,7 @@ class MainWindow(QMainWindow):
         self.dl_bler = 0
         self.snr = 0
         self._gnb_start_time = time.time()
+        self.sim_mode = True  # default simulation mode: true for RFSim, False for PHY test mode
     # ---- layout --------------------------------------------------------------
     def _build_widgets(self):
         central = QWidget()
@@ -132,8 +133,6 @@ class MainWindow(QMainWindow):
         self.timer.setInterval(STATS_REFRESH_MS) #set timer interval to check BLER, SNR every 100ms
         self.timer.timeout.connect(self.live_stats)
         self.timer.start()
-
-    
     
     def _button(self, text, command):
         button = QPushButton(text)
