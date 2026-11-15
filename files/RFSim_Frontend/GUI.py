@@ -7,15 +7,24 @@ Needs:
 Run:  python3 GUI.py
 
 """
+import json
 import os
 import sys
 import re
 import time
 from pathlib import Path
-from PyQt6.QtCore import QProcess, QTimer
-from PyQt6.QtWidgets import (QApplication, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel,
-                             QLineEdit, QMainWindow, QPlainTextEdit, QPushButton, QTabWidget,
+from PyQt6.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer
+from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
+                             QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                             QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+                             QTabWidget,
                              QVBoxLayout, QWidget, QFileDialog)
+
+# GUI.py sits in a subfolder; plans.py, settings.py, export.py and the planner are one level up
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_run, parse_mcs,
+                   run_dir, sinr_points, write_run_confs)
+from settings import APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, PLANS_DIR
 
 # ----------------------------------------------------------------------------
 # SETTINGS
@@ -48,11 +57,14 @@ UL_SNR_RE = re.compile(r"ulsch_power\[0\] (\d+[.,]\d) ulsch_noise_power\[0\] (\d
 DEFAULT_SAVE_DIR = os.path.join(Path(__file__).parent, "saved_runs")
 SAVE_DIR = DEFAULT_SAVE_DIR
 
+# Bulk data collection: the site planner sits next to this file, plans are saved in PLANS_DIR
+PLANNER_SCRIPT = os.path.join(APP_DIR, "qt_lunar_site_planner.py")
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RFSim Frontend")
-        self.resize(1000, 700)
+        self.resize(1000, 900)
         self._build_widgets()
 
         #-----gnb/ue processes----
@@ -92,6 +104,8 @@ class MainWindow(QMainWindow):
         output_form.addRow("Save directory", self._path_row(self.save_dir_edit, self.browse_save_dir))
         layout.addWidget(output)
 
+        layout.addWidget(self._build_bulk_group())
+
         # Process controls: start/stop buttons and a status label per node
         controls = QGroupBox("Processes")
         grid = QGridLayout(controls)
@@ -125,6 +139,273 @@ class MainWindow(QMainWindow):
         self.logs.addTab(self.gnb_log, "gNB output")
         self.logs.addTab(self.ue_log, "UE output")
         layout.addWidget(self.logs, 1)
+
+    # ---- bulk data collection ------------------------------------------------
+    def _build_bulk_group(self):
+        """Site plans (made in the planner), MCS list, SINR range, output folder."""
+        os.makedirs(PLANS_DIR, exist_ok=True)
+        group = QGroupBox("Bulk data collection (BLER / SINR vs MCS)")
+        v = QVBoxLayout(group)
+
+        top = QHBoxLayout()
+        top.addWidget(self._button("Open site planner", self.open_planner))
+        top.addWidget(self._button("Refresh plans", self.refresh_plans))
+        top.addWidget(self._button("Remove selected", self.remove_selected_plans))
+        top.addStretch()
+        v.addLayout(top)
+
+        self.plan_list = QListWidget()
+        self.plan_list.setMaximumHeight(120)
+        v.addWidget(self.plan_list)
+        self.plan_note = QLabel()
+        v.addWidget(self.plan_note)
+
+        form = QFormLayout()
+        self.mcs_edit = QLineEdit("0-27")
+        self.mcs_edit.setToolTip("MCS indices, e.g. 0-9, 12, 15-20  (valid range 0-28)")
+        form.addRow("MCS to run", self.mcs_edit)
+
+        sinr_row = QHBoxLayout()
+        self.sinr_min, self.sinr_max, self.sinr_step = (QDoubleSpinBox() for _ in range(3))
+        for box, value in ((self.sinr_min, -5.0), (self.sinr_max, 30.0)):
+            box.setRange(-50.0, 100.0)
+            box.setDecimals(1)
+            box.setValue(value)
+            box.setSuffix(" dB")
+        self.sinr_step.setRange(0.1, 50.0)
+        self.sinr_step.setDecimals(1)
+        self.sinr_step.setValue(1.0)
+        self.sinr_step.setSuffix(" dB")
+        for label, box in (("from", self.sinr_min), ("to", self.sinr_max), ("step", self.sinr_step)):
+            sinr_row.addWidget(QLabel(label))
+            sinr_row.addWidget(box)
+        sinr_row.addStretch()
+        form.addRow("SINR range", sinr_row)
+
+        timing = QHBoxLayout()
+        self.settle_s, self.attach_s, self.measure_s = (QSpinBox() for _ in range(3))
+        for label, box, value in (("gNB settle", self.settle_s, BULK_SETTLE_S),
+                                  ("UE attach wait", self.attach_s, BULK_ATTACH_S),
+                                  ("measure", self.measure_s, BULK_MEASURE_S)):
+            box.setRange(1, 3600)
+            box.setValue(value)
+            box.setSuffix(" s")
+            timing.addWidget(QLabel(label))
+            timing.addWidget(box)
+        timing.addStretch()
+        form.addRow("Per-run timing", timing)
+        v.addLayout(form)
+
+        bottom = QHBoxLayout()
+        bottom.addWidget(self._button("Create bulk run folder", self.create_bulk_run))
+        self.bulk_start_btn = self._button("Start bulk run", self.start_bulk_run)
+        self.bulk_abort_btn = self._button("Abort", self.abort_bulk)
+        self.bulk_abort_btn.setEnabled(False)
+        bottom.addWidget(self.bulk_start_btn)
+        bottom.addWidget(self.bulk_abort_btn)
+        self.bulk_status = QLabel("")
+        self.bulk_status.setWordWrap(True)
+        bottom.addWidget(self.bulk_status, 1)
+        v.addLayout(bottom)
+
+        # new plans saved from the planner show up without pressing Refresh
+        self.plan_watcher = QFileSystemWatcher([PLANS_DIR], self)
+        self.plan_watcher.directoryChanged.connect(lambda _path: self.refresh_plans())
+        self.bulk_dir = None
+        self._bulk_running = False
+        self._bulk_gen = 0              # bumped on abort so stale timers do nothing
+        self._bulk_queue, self._bulk_i = [], 0
+        self._bulk_saved_confs = None
+        self.refresh_plans()
+        return group
+
+    def open_planner(self):
+        """Start the site planner as its own program. Plans it saves land in PLANS_DIR."""
+        if not os.path.exists(PLANNER_SCRIPT):
+            QMessageBox.warning(self, "Site planner", f"Not found:\n{PLANNER_SCRIPT}")
+            return
+        started, _pid = QProcess.startDetached(sys.executable, [PLANNER_SCRIPT], APP_DIR)
+        if not started:
+            QMessageBox.warning(self, "Site planner", "Could not start the site planner.")
+        else:
+            self.bulk_status.setText("Planner opened. Place the gNB and UE, then use "
+                                     "'Save site plan for bulk run...'.")
+
+    def refresh_plans(self):
+        """Reload the plan list, keeping the ticks of plans that are still there."""
+        ticked = {self.plan_list.item(i).data(Qt.ItemDataRole.UserRole)
+                  for i in range(self.plan_list.count())
+                  if self.plan_list.item(i).checkState() == Qt.CheckState.Checked}
+        first_load = self.plan_list.count() == 0
+        self.plan_list.clear()
+        for plan in load_plans():
+            item = QListWidgetItem(f"{plan['name']}  [{plan['region_label']}, "
+                                   f"{plan.get('separation_m', '?')} m]")
+            item.setData(Qt.ItemDataRole.UserRole, plan["file"])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = plan["file"] in ticked or first_load
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self.plan_list.addItem(item)
+        self.plan_note.setText(f"{self.plan_list.count()} saved plan(s) in {PLANS_DIR}")
+
+    def remove_selected_plans(self):
+        rows = self.plan_list.selectedItems()
+        if rows and QMessageBox.question(self, "Remove plans",
+                                         f"Delete {len(rows)} saved plan file(s)?"
+                                         ) == QMessageBox.StandardButton.Yes:
+            for item in rows:
+                delete_plan(item.data(Qt.ItemDataRole.UserRole))
+            self.refresh_plans()
+
+    def checked_plans(self):
+        files = {self.plan_list.item(i).data(Qt.ItemDataRole.UserRole)
+                 for i in range(self.plan_list.count())
+                 if self.plan_list.item(i).checkState() == Qt.CheckState.Checked}
+        return [p for p in load_plans() if p["file"] in files]
+
+    def create_bulk_run(self):
+        """Validate the inputs, then create the timestamped folder for raw runs and data."""
+        plans = self.checked_plans()
+        if not plans:
+            QMessageBox.warning(self, "Bulk run", "Tick at least one site plan "
+                                "(open the site planner to make some).")
+            return False
+        try:
+            mcs = parse_mcs(self.mcs_edit.text())
+            sinr = sinr_points(self.sinr_min.value(), self.sinr_max.value(), self.sinr_step.value())
+        except ValueError as err:
+            QMessageBox.warning(self, "Bulk run", str(err))
+            return False
+        runs = len(plans) * len(mcs) * len(sinr)
+        parent = SAVE_DIR          # the "Run output" save directory; the bulk folder is created inside it
+        try:
+            os.makedirs(parent, exist_ok=True)
+            self.bulk_dir = make_bulk_run(parent, plans, mcs, sinr)
+        except OSError as err:
+            QMessageBox.critical(self, "Bulk run", f"Could not create the folder:\n{err}")
+            return False
+        self.bulk_status.setText(f"Created {self.bulk_dir}\n{len(plans)} plan(s) x {len(mcs)} MCS x "
+                                 f"{len(sinr)} SINR points = {runs} runs")
+        return True
+
+    # ---- sequential bulk run -------------------------------------------------
+    def _later(self, ms, fn):
+        """Run fn after ms, unless the bulk run was aborted or finished in the meantime."""
+        gen = self._bulk_gen
+        QTimer.singleShot(ms, lambda: fn() if gen == self._bulk_gen and self._bulk_running else None)
+
+    def start_bulk_run(self):
+        """Create the folder, then run every plan x MCS x SINR one after another."""
+        if self._bulk_running:
+            return
+        busy = [p for p in (self.p_gnb, self.p_ue)
+                if p is not None and p.state() != QProcess.ProcessState.NotRunning]
+        if busy:
+            QMessageBox.warning(self, "Bulk run", "Stop the gNB and UE first (Stop all).")
+            return
+        if not self.create_bulk_run():
+            return
+        with open(os.path.join(self.bulk_dir, "manifest.json"), encoding="utf-8") as f:
+            self._bulk_queue = build_queue(json.load(f))
+        self._bulk_i = 0
+        self._bulk_saved_confs = (self.gnb_conf.text(), self.ue_conf.text())
+        self._bulk_running = True
+        self._bulk_gen += 1
+        self.bulk_start_btn.setEnabled(False)
+        self.bulk_abort_btn.setEnabled(True)
+        self._bulk_next()
+
+    def abort_bulk(self):
+        if self._bulk_running:
+            self._bulk_end("Aborted", stop=True)
+
+    def _bulk_end(self, message, stop=False):
+        self._bulk_running = False
+        self._bulk_gen += 1
+        if stop:
+            self.stop_all()
+        if self._bulk_saved_confs:
+            self.gnb_conf.setText(self._bulk_saved_confs[0])
+            self.ue_conf.setText(self._bulk_saved_confs[1])
+        self.bulk_start_btn.setEnabled(True)
+        self.bulk_abort_btn.setEnabled(False)
+        self.bulk_status.setText(f"{message}. Data: {os.path.join(self.bulk_dir, 'data')}")
+
+    def _bulk_next(self):
+        if self._bulk_i >= len(self._bulk_queue):
+            self._bulk_end(f"Finished {len(self._bulk_queue)} runs")
+            return
+        key, mcs, sinr = self._bulk_queue[self._bulk_i]
+        try:
+            gnb_conf, ue_conf = write_run_confs(self.bulk_dir, key, mcs, sinr)
+        except (OSError, ValueError) as err:
+            QMessageBox.critical(self, "Bulk run", str(err))
+            self._bulk_end("Stopped: could not write run configs")
+            return
+        self.gnb_conf.setText(gnb_conf)
+        self.ue_conf.setText(ue_conf)
+        self._bulk_samples = {"dl": [], "ul": [], "snr": []}
+        self.bulk_status.setText(f"Run {self._bulk_i + 1}/{len(self._bulk_queue)}: {key}, "
+                                 f"MCS {mcs}, target SINR {sinr:g} dB (starting gNB)")
+        self.start_gnb()
+        self._later(self.settle_s.value() * 1000, self._bulk_start_ue)
+
+    def _bulk_start_ue(self):
+        self.start_ue()
+        self.bulk_status.setText(self.bulk_status.text().replace("starting gNB", "UE attaching"))
+        self._later(self.attach_s.value() * 1000, self._bulk_measure_begin)
+
+    def _bulk_measure_begin(self):
+        self.bulk_status.setText(self.bulk_status.text().replace("UE attaching", "measuring"))
+        self._bulk_left = self.measure_s.value()
+        self._bulk_sample()
+
+    def _bulk_sample(self):
+        """Once a second: note the stats if the gNB's dump files are fresh."""
+        mac, l1 = self._read_stats_file(NR_MAC_STATS), self._read_stats_file(NR_L1_STATS)
+        s = self._bulk_samples
+        if mac and DL_RE.search(mac):
+            s["dl"].append(self.dl_bler)
+        if mac and UL_RE.search(mac):
+            s["ul"].append(self.ul_bler)
+        if l1 and UL_SNR_RE.search(l1):
+            s["snr"].append(self.snr)
+        self._bulk_left -= 1
+        self._later(1000, self._bulk_sample if self._bulk_left > 0 else self._bulk_finish_run)
+
+    def _bulk_finish_run(self):
+        """Record the row, keep the raw logs, stop everything, then start the next run."""
+        key, mcs, sinr = self._bulk_queue[self._bulk_i]
+        s = self._bulk_samples
+        fmt = lambda v: f"{v:.6f}" if v is not None else ""
+        # BLER counters in OAI's dumps are cumulative since the gNB started, so the last value is
+        # the run's BLER; SNR fluctuates, so it is averaged.
+        append_row(self.bulk_dir, {
+            "plan": key, "mcs": mcs, "target_sinr_db": f"{sinr:g}",
+            "dl_bler": fmt(s["dl"][-1] if s["dl"] else None),
+            "ul_bler": fmt(s["ul"][-1] if s["ul"] else None),
+            "ul_snr_db": fmt(sum(s["snr"]) / len(s["snr"]) if s["snr"] else None),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")})
+        out = run_dir(self.bulk_dir, key, mcs, sinr)
+        for name, log in (("gnb.log", self.gnb_log), ("ue.log", self.ue_log)):
+            try:
+                with open(os.path.join(out, name), "w", encoding="utf-8") as f:
+                    f.write(log.toPlainText())
+            except OSError:
+                pass
+            log.clear()
+        self.stop_all()
+        self._bulk_wait_stopped(tries=20)
+
+    def _bulk_wait_stopped(self, tries):
+        """Wait (up to ~10 s) for both processes to exit, then a short pause for the ports."""
+        busy = any(p is not None and p.state() != QProcess.ProcessState.NotRunning
+                   for p in (self.p_gnb, self.p_ue))
+        if busy and tries > 0:
+            self._later(500, lambda: self._bulk_wait_stopped(tries - 1))
+            return
+        self._bulk_i += 1
+        self._later(2000, self._bulk_next)
 
     def start_timer(self):
         if self.timer is not None:
@@ -335,6 +616,7 @@ class MainWindow(QMainWindow):
 
         event.ignore()
         self._closing = True
+        self._bulk_running = False
         if self.timer is not None:
             self.timer.stop()
         self.stop_all()

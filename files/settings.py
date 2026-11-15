@@ -22,6 +22,7 @@ POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
 TEMPLATE_DIR = os.path.join(APP_DIR, "Templates")                       # OAI gNB/UE .conf templates filled on export
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m
+PLANS_DIR = os.path.join(APP_DIR, "plans")                               # saved gNB+UE site plans (JSON) for bulk runs
 
 # optimal_gNB.py lives at the repo root, alongside its coverage/index CSVs
 OPTIMAL_GNB_CANDIDATES_CSV = os.path.join(ROOT_DIR, "candidates_coverage.csv")
@@ -69,6 +70,18 @@ GNB_CONF = "gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf"
 UE_CONF = "ue.bictr.conf"
 BLOCK_GNB_SIDE = "rfsimu_channel_enB0"   # TX = gNB, RX = UE
 BLOCK_UE_SIDE = "rfsimu_channel_ue0"     # TX = UE,  RX = gNB (swapped)
+
+# ----------------------------------------------------------------------------
+# Bulk data collection: how a run's MCS and SINR are written into the .conf files
+# ----------------------------------------------------------------------------
+BULK_MCS_KEYS = ("dl_min_mcs", "dl_max_mcs", "ul_max_mcs")   # gNB conf keys set to the run's MCS (pins it)
+BULK_NOISE_KEY = "noise_power_dB"        # key inside each rfsimu_channel_* entry
+BULK_NOISE_AT_0DB_SINR = -20.0           # CALIBRATE: noise_power_dB that gives ~0 dB SINR on your link.
+                                         # A run's noise is BULK_NOISE_AT_0DB_SINR - target SINR. The measured
+                                         # UL SNR is logged next to the target, so you can check the mapping.
+BULK_SETTLE_S = 15                       # seconds after starting the gNB before the UE is started
+BULK_ATTACH_S = 20                       # seconds after starting the UE before measuring
+BULK_MEASURE_S = 30                      # seconds of live-stats sampling per run
 
 # ----------------------------------------------------------------------------
 # LOOK AND FEEL: change colours and font size here (all UI colours live in this block)
