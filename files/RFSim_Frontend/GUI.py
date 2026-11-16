@@ -24,8 +24,11 @@ OAI_DIR = "/home/lunar5g/openairinterface5g"
 OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
 #CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF")
 CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF", "RF_SIMULATION")
-DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
-DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
+#DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
+#UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
+GNB_CONF = ""
+UE_CONF= ""
+
 STATS_REFRESH_MS = 500      # how often refresh_stats() should run once implemented
 NR_MAC_STATS = os.path.join(OAI_BUILD_DIR, "nrMAC_stats.log")  
 NR_L1_STATS = os.path.join(OAI_BUILD_DIR, "nrL1_stats.log")
@@ -74,21 +77,25 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        #main buttons:
+
+        main_btns = QGroupBox("Other stuff")
+        btns = QFormLayout(main_btns)
+
+        self.mode_toggle = QPushButton(f"Switch to {'RFSim' if self.sim_mode else 'PHY test'} mode")
+        self.mode_toggle.clicked.connect(self.toggle_mode)
+        btns.addRow(self.mode_toggle)
+
+        flush_logs = QPushButton("Flush log files")
+        flush_logs.clicked.connect(self.flush_log_files)
+        btns.addRow(flush_logs)   
+        layout.addWidget(main_btns)
 
         # Config files: one row per node, path box + Browse
         configs = QGroupBox("Config files")
         form = QFormLayout(configs)
-        self.gnb_conf = QLineEdit(DEFAULT_GNB_CONF)
-        self.ue_conf = QLineEdit(DEFAULT_UE_CONF) 
-
-        
-        mode_toggle = QPushButton(f"Switch to {'RFSim' if self.sim_mode else 'PHY test'} mode")
-        mode_toggle.clicked.connect(self.toggle_mode)
-        form.addRow(mode_toggle)
-
-        flush_logs = QPushButton("Flush log files")
-        flush_logs.clicked.connect(self.flush_log_files)
-        form.addRow(flush_logs)
+        self.gnb_conf = QLineEdit(GNB_CONF)
+        self.ue_conf = QLineEdit(UE_CONF)
 
         form.addRow("gNB .conf", self._path_row(self.gnb_conf, self.browse_gnb_config))
         form.addRow("UE .conf", self._path_row(self.ue_conf, self.browse_ue_config))
@@ -131,7 +138,7 @@ class MainWindow(QMainWindow):
         # Output: one read-only log per process
         self.logs = QTabWidget()
         self.gnb_log = QPlainTextEdit(readOnly=True)
-        self.ue_log = QPlainTextEdit(readOnly=True)
+        self.ue_log = QPlainTextEdit(readOnly=True) 
         self.logs.addTab(self.gnb_log, "gNB output")
         self.logs.addTab(self.ue_log, "UE output")
         layout.addWidget(self.logs, 1)
@@ -146,9 +153,10 @@ class MainWindow(QMainWindow):
 
     def toggle_mode(self):
         self.sim_mode = not self.sim_mode
+        self.mode_toggle.setText(f"Switch to {'RFSim' if self.sim_mode else 'PHY test'} mode")
         if self.sim_mode:
-            self.gnb_conf.setText(DEFAULT_GNB_CONF)
-            self.ue_conf.setText(DEFAULT_UE_CONF)
+            self.gnb_conf.setText(GNB_CONF)
+            self.ue_conf.setText(UE_CONF)
         else:
             self.gnb_conf.setText(GNB_MAKE_PHY)
             self.ue_conf.setText(UE_MAKE_PHY)
@@ -218,7 +226,10 @@ class MainWindow(QMainWindow):
         process.errorOccurred.connect(
             lambda error: self._process_error("gNB", process, error)
         )
-        process.start("bash", [GNB_MAKE, self._gnb_conf_path()])
+        if(self.sim_mode):
+            process.start("bash", [GNB_MAKE, self._gnb_conf_path()])
+        else:
+            process.start("bash", [GNB_MAKE_PHY, self._gnb_conf_path()])
         self._gnb_start_time = time.time()
         self.start_timer()  # Start the timer to refresh stats
         self.gnb_status.setText("gNB: Starting")
@@ -238,8 +249,10 @@ class MainWindow(QMainWindow):
         process.errorOccurred.connect(
             lambda error: self._process_error("UE", process, error)
         )
-        
-        process.start("bash", [UE_MAKE, self._ue_conf_path()])
+        if(self.sim_mode):
+            process.start("bash", [UE_MAKE, self._ue_conf_path()])
+        else:
+            process.start("bash", [UE_MAKE_PHY, self._ue_conf_path()])
         self.ue_status.setText("UE: Starting")
 
     def _gnb_conf_path(self):
