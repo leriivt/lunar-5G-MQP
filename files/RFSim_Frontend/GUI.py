@@ -67,7 +67,7 @@ class MainWindow(QMainWindow):
         self.dl_bler = 0
         self.snr = 0
         self._gnb_start_time = time.time()
-        self.sim_mode = True  # default simulation mode: true for RFSim, False for PHY test mode
+        self.sim_mode = True  # default simulation mode: true = RFSim, False = PHY test mode
     # ---- layout --------------------------------------------------------------
     def _build_widgets(self):
         central = QWidget()
@@ -79,6 +79,15 @@ class MainWindow(QMainWindow):
         form = QFormLayout(configs)
         self.gnb_conf = QLineEdit(DEFAULT_GNB_CONF)
         self.ue_conf = QLineEdit(DEFAULT_UE_CONF) 
+
+        
+        mode_toggle = QPushButton(f"Switch to {'RFSim' if self.sim_mode else 'PHY test'} mode")
+        mode_toggle.clicked.connect(self.toggle_mode)
+        form.addRow(mode_toggle)
+
+        flush_logs = QPushButton("Flush log files")
+        flush_logs.clicked.connect(self.flush_log_files)
+        form.addRow(flush_logs)
 
         form.addRow("gNB .conf", self._path_row(self.gnb_conf, self.browse_gnb_config))
         form.addRow("UE .conf", self._path_row(self.ue_conf, self.browse_ue_config))
@@ -133,7 +142,26 @@ class MainWindow(QMainWindow):
         self.timer.setInterval(STATS_REFRESH_MS) #set timer interval to check BLER, SNR every 100ms
         self.timer.timeout.connect(self.live_stats)
         self.timer.start()
-    
+
+    def toggle_mode(self):
+        self.sim_mode = not self.sim_mode
+        if self.sim_mode:
+            self.gnb_conf.setText(DEFAULT_GNB_CONF)
+            self.ue_conf.setText(DEFAULT_UE_CONF)
+        else:
+            self.gnb_conf.setText(GNB_MAKE_PHY)
+            self.ue_conf.setText(UE_MAKE_PHY)
+
+    def flush_log_files(self):
+        """Flush the gnb/ue log files."""
+        for log_file in (NR_MAC_STATS, NR_L1_STATS):
+            try:
+                with open(log_file, "w"):
+                    pass
+            except OSError as e:
+                print(f"Error flushing {log_file}: {e}")
+
+
     def _button(self, text, command):
         button = QPushButton(text)
         button.clicked.connect(lambda _checked=False: command())
@@ -259,7 +287,7 @@ class MainWindow(QMainWindow):
     def _kill_if_running(self, process):
         if process.state() != QProcess.ProcessState.NotRunning:
             process.kill()
-
+        
     def stop_all(self):
         """Stop the UE, then the gNB."""
         self.stopper = QProcess(self)
@@ -351,6 +379,7 @@ class MainWindow(QMainWindow):
   
     # ---- save runs in file -------------------------------------------------------------
     def save_run(self):
+        """Save the current run's configuration and stats to a text file, and save the log files in the same directory"""
 
         #create special identifier
         os.makedirs(SAVE_DIR, exist_ok=True)
@@ -366,6 +395,8 @@ class MainWindow(QMainWindow):
             f.write(f"run time: {self._gnb_end_time - self._gnb_start_time:.2f} s\n") 
 
             f.write("Packets sent: \n") #fill in here
+        
+        
 
 
 

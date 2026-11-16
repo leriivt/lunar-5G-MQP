@@ -1,5 +1,6 @@
 #!/usr/bin/env bash\
-IP = $"addr=10.10.10.13"
+IP = "${1:-addr=10.10.10.13}"
+[ -f "$IP" ] || { echo "Config not found: $IP"; exit 1 ; }
 cd /home/lunar5g/openairinterface5g/cmake_targets/ran_build/build || exit 1
 pgrep -x nr-softmodem >/dev/null || { echo "WARNING: no nr-softmodem running. Start the gNB first."; sleep 3; }
 [ -f reconfig.raw ] && [ -f rbconfig.raw ] || echo "WARNING: reconfig.raw/rbconfig.raw missing — gNB may not have finished starting."
