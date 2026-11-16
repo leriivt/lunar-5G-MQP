@@ -119,7 +119,8 @@ class MainWindow(QMainWindow):
                 ("UE", self.ue_status, self.start_ue))):
             grid.addWidget(status, row, 0)
             grid.addWidget(self._button(f"Start {name}", start), row, 1)
-        grid.addWidget(self._button("Stop all", self.stop_all), 0, 2, 2, 1)
+        grid.addWidget(self._button("Stop all", self.stop_all), 0, 2)
+        grid.addWidget(self._button("Save runs", self.save_run), 1, 2)
         layout.addWidget(controls)
 
         # Live stats: one value label per metric
@@ -154,12 +155,6 @@ class MainWindow(QMainWindow):
     def toggle_mode(self):
         self.sim_mode = not self.sim_mode
         self.mode_toggle.setText(f"Switch to {'RFSim' if self.sim_mode else 'PHY test'} mode")
-        if self.sim_mode:
-            self.gnb_conf.setText(GNB_CONF)
-            self.ue_conf.setText(UE_CONF)
-        else:
-            self.gnb_conf.setText(GNB_MAKE_PHY)
-            self.ue_conf.setText(UE_MAKE_PHY)
 
     def flush_log_files(self):
         """Flush the gnb/ue log files."""
@@ -304,6 +299,7 @@ class MainWindow(QMainWindow):
         
     def stop_all(self):
         """Stop the UE, then the gNB."""
+        print("Stopping all processes...")
         self.stopper = QProcess(self)
         stopper = self.stopper
         stopper.finished.connect(self._stopper_finished)
@@ -379,36 +375,35 @@ class MainWindow(QMainWindow):
         self._closing = True
         if self.timer is not None:
             self.timer.stop()
+        # self._signal_process_group(self.stopper, signal.SIGTERM)
         self.stop_all()
 
-        # Give the stop script and QProcess terminate signals time to finish.
+        # Give managed process groups time to exit before escalating.
         QTimer.singleShot(2000, self._finish_shutdown)
 
     def _finish_shutdown(self):
         self._force_kill_managed_processes()
-        if self.stopper is not None and self.stopper.state() != QProcess.ProcessState.NotRunning:
-            self.stopper.kill()
         super().close()
 
   
     # ---- save runs in file -------------------------------------------------------------
     def save_run(self):
         """Save the current run's configuration and stats to a text file, and save the log files in the same directory"""
+        print("Saving run...")
+        # #create special identifier
+        # os.makedirs(SAVE_DIR, exist_ok=True)
+        # file = os.path.join(SAVE_DIR, f"run_{time.strftime('%Y-%m-%d_%H-%M-%S')}.txt")
 
-        #create special identifier
-        os.makedirs(SAVE_DIR, exist_ok=True)
-        file = os.path.join(SAVE_DIR, f"run_{time.strftime('%Y-%m-%d_%H-%M-%S')}.txt")
+        # with open(file, "w") as f:
+        #     f.write(f"Run saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        #     f.write(f"gNB config: {self._gnb_conf_path()}\n")
+        #     f.write(f"UE config: {self._ue_conf_path()}\n")
+        #     f.write(f"DL BLER: {self.dl_bler:.5f}\n")
+        #     f.write(f"UL BLER: {self.ul_bler:.5f}\n")
+        #     f.write(f"SNR: {self.snr:.5f} dB\n")
+        #     f.write(f"run time: {self._gnb_end_time - self._gnb_start_time:.2f} s\n") 
 
-        with open(file, "w") as f:
-            f.write(f"Run saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"gNB config: {self._gnb_conf_path()}\n")
-            f.write(f"UE config: {self._ue_conf_path()}\n")
-            f.write(f"DL BLER: {self.dl_bler:.5f}\n")
-            f.write(f"UL BLER: {self.ul_bler:.5f}\n")
-            f.write(f"SNR: {self.snr:.5f} dB\n")
-            f.write(f"run time: {self._gnb_end_time - self._gnb_start_time:.2f} s\n") 
-
-            f.write("Packets sent: \n") #fill in here
+        #     f.write("Packets sent: \n") #fill in here
         
         
 
