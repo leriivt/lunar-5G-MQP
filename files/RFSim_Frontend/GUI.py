@@ -35,6 +35,8 @@ OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
 CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF", "RF_SIMULATION")
 DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
+# last gNB/UE .conf chosen in the GUI, restored on the next launch (per machine, not in git)
+LAST_CONFS_FILE = os.path.join(Path(__file__).parent, "last_confs.json")
 STATS_REFRESH_MS = 500      # how often refresh_stats() should run once implemented
 NR_MAC_STATS = os.path.join(OAI_BUILD_DIR, "nrMAC_stats.log")  
 NR_L1_STATS = os.path.join(OAI_BUILD_DIR, "nrL1_stats.log")
@@ -89,8 +91,12 @@ class MainWindow(QMainWindow):
         # Config files: one row per node, path box + Browse
         configs = QGroupBox("Config files")
         form = QFormLayout(configs)
-        self.gnb_conf = QLineEdit(DEFAULT_GNB_CONF)
-        self.ue_conf = QLineEdit(DEFAULT_UE_CONF) 
+        last = self._load_last_confs()
+        self.gnb_conf = QLineEdit(last.get("gnb_conf", DEFAULT_GNB_CONF))
+        self.ue_conf = QLineEdit(last.get("ue_conf", DEFAULT_UE_CONF))
+        # typing a path by hand counts as choosing it (bulk runs use setText, which doesn't fire this)
+        self.gnb_conf.editingFinished.connect(self._save_last_confs)
+        self.ue_conf.editingFinished.connect(self._save_last_confs)
 
         form.addRow("gNB .conf", self._path_row(self.gnb_conf, self.browse_gnb_config))
         form.addRow("UE .conf", self._path_row(self.ue_conf, self.browse_ue_config))
@@ -429,23 +435,48 @@ class MainWindow(QMainWindow):
         return row
 
     # ---- 3. interchangeable .conf files --------------------------------------
+    @staticmethod
+    def _load_last_confs():
+        """{'gnb_conf': path, 'ue_conf': path} from the last session; files that are gone are dropped."""
+        try:
+            with open(LAST_CONFS_FILE, encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        return {k: v for k, v in saved.items()
+                if k in ("gnb_conf", "ue_conf") and isinstance(v, str) and os.path.isfile(v)}
+
+    def _save_last_confs(self):
+        """Remember the chosen gNB/UE .conf for the next launch (not called for bulk-run confs)."""
+        try:
+            with open(LAST_CONFS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"gnb_conf": self.gnb_conf.text(), "ue_conf": self.ue_conf.text()}, f, indent=2)
+        except OSError:
+            pass
+
+    def _conf_dialog_dir(self, line_edit):
+        """Open the file dialog where the current file is, if it exists."""
+        folder = os.path.dirname(line_edit.text())
+        return folder if os.path.isdir(folder) else CONF_DIR
+
     def browse_gnb_config(self):
         """Pick a gNB .conf file and put its path in self.gnb_conf."""
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Select gNB .conf file", CONF_DIR, "Config files (*.conf)"
+            self, "Select gNB .conf file", self._conf_dialog_dir(self.gnb_conf), "Config files (*.conf)"
         )
         if file_name:
             self.gnb_conf.setText(file_name)
-        
+            self._save_last_confs()
 
     def browse_ue_config(self):
         """Pick a UE .conf file and put its path in self.ue_conf."""
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Select UE .conf file", CONF_DIR, "Config files (*.conf)"
+            self, "Select UE .conf file", self._conf_dialog_dir(self.ue_conf), "Config files (*.conf)"
         )
         if file_name:
             self.ue_conf.setText(file_name)
-        
+            self._save_last_confs()
+
     def browse_save_dir(self):
         """Choose the directory where run summaries are saved."""
         global SAVE_DIR
@@ -603,9 +634,17 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _bler(rounds, errors):
-        """residual BLER: blocks still failed after the last HARQ round / first transmissions"""
-        first_tx = int(rounds.split("/")[0])
-        return int(errors) / first_tx if first_tx else 0.0
+        """First-round BLER: share of first transmissions that needed a retransmission.
+
+        OAI prints `rounds` as "r0/r1/r2/r3": r0 = first transmissions, r1 = first
+        retransmissions (one per failed first transmission), so BLER = r1 / r0.
+        With harq_round_max = 1 only r0 is printed and every failure goes straight to
+        `errors`, so then BLER = errors / r0."""
+        counts = [int(c) for c in rounds.split("/")]
+        if not counts[0]:
+            return 0.0
+        failed = counts[1] if len(counts) > 1 else int(errors)
+        return failed / counts[0]
 
     
     # ---- shutdown -------------------------------------------------------------

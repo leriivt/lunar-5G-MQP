@@ -76,7 +76,7 @@ BLOCK_UE_SIDE = "rfsimu_channel_ue0"     # TX = UE,  RX = gNB (swapped)
 # ----------------------------------------------------------------------------
 BULK_MCS_KEYS = ("dl_min_mcs", "dl_max_mcs", "ul_max_mcs")   # gNB conf keys set to the run's MCS (pins it)
 BULK_NOISE_KEY = "noise_power_dB"        # key inside each rfsimu_channel_* entry
-BULK_NOISE_AT_0DB_SINR = -20.0           # CALIBRATE: noise_power_dB that gives ~0 dB SINR on your link.
+BULK_NOISE_AT_0DB_SINR = -0.7           # CALIBRATE: noise_power_dB that gives ~0 dB SINR on your link.
                                          # A run's noise is BULK_NOISE_AT_0DB_SINR - target SINR. The measured
                                          # UL SNR is logged next to the target, so you can check the mapping.
 BULK_SETTLE_S = 15                       # seconds after starting the gNB before the UE is started

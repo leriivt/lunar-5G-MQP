@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 files/exports/
 files/RFSim_Frontend/saved_runs/
+files/RFSim_Frontend/last_confs.json
