@@ -77,8 +77,10 @@ def make_run_folder(parent, label):
     return path
 
 
-def export_configs(out_dir, template_dir, gnb, ue, gnb_h, ue_h, dem_path):
-    """Write the gNB and UE conf files. Both contain both entries, TX/RX swapped."""
+def export_configs(out_dir, template_dir, gnb, ue, gnb_h, ue_h, dem_path, templates=None):
+    """Write the gNB and UE conf files. Both contain both entries, TX/RX swapped.
+    templates: optional {GNB_CONF: path, UE_CONF: path} to fill instead of the files in
+    template_dir (the output is still written under the GNB_CONF / UE_CONF names)."""
     entries = {
         BLOCK_GNB_SIDE: block_values(gnb, ue, gnb_h, ue_h, dem_path),
         BLOCK_UE_SIDE: block_values(ue, gnb, ue_h, gnb_h, dem_path),
@@ -86,8 +88,9 @@ def export_configs(out_dir, template_dir, gnb, ue, gnb_h, ue_h, dem_path):
     written = []
     for name in (GNB_CONF, UE_CONF):
         template = ""
-        if template_dir and os.path.exists(os.path.join(template_dir, name)):
-            with open(os.path.join(template_dir, name), encoding="utf-8") as f:
+        src = (templates or {}).get(name) or (os.path.join(template_dir, name) if template_dir else None)
+        if src and os.path.exists(src):
+            with open(src, encoding="utf-8") as f:
                 template = f.read()
         os.makedirs(out_dir, exist_ok=True)
         path = os.path.join(out_dir, name)

@@ -21,7 +21,7 @@ import csv
 import re
 
 from export import export_configs, fill_block, make_run_folder, run_folder_name
-from settings import (BLOCK_GNB_SIDE, BLOCK_UE_SIDE, BULK_MCS_KEYS, BULK_NOISE_AT_0DB_SINR,
+from settings import (BLOCK_GNB_SIDE, BLOCK_UE_SIDE, BULK_DL_GAIN_DB, BULK_NOISE_AT_0DB_SINR,
                       BULK_NOISE_KEY, GNB_CONF, PLANS_DIR, TEMPLATE_DIR, UE_CONF)
 
 MCS_MIN, MCS_MAX = 0, 28             # NR MCS index range (table 1: 0-28; 256QAM table: 0-27)
@@ -116,7 +116,8 @@ def sinr_points(lo, hi, step):
 # ----------------------------------------------------------------------------
 # Bulk run folder
 # ----------------------------------------------------------------------------
-def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR):
+def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
+                  gnb_template=None, ue_template=None):
     """Create <parent>/bulk_<date>_<time>/ and fill it:
 
         manifest.json              what was requested (plans, MCS list, SINR list, run count)
@@ -125,7 +126,14 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR)
                                    per MCS for raw logs
         data/bler_sinr_by_mcs.csv  header only; the collector appends one row per measurement
 
-    Returns the folder path."""
+    gnb_template / ue_template: the .conf files to build each run from (the GUI passes the ones
+    selected for manual runs, so bulk runs use the same cell config); None = the files in
+    template_dir. Returns the folder path."""
+    templates = {GNB_CONF: gnb_template or os.path.join(template_dir, GNB_CONF),
+                 UE_CONF: ue_template or os.path.join(template_dir, UE_CONF)}
+    for path in templates.values():
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"template .conf not found: {path}")
     root = make_run_folder(parent, "bulk")
     os.makedirs(os.path.join(root, "plans"))
     os.makedirs(os.path.join(root, "data"))
@@ -136,7 +144,8 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR)
         raw = os.path.join(root, "raw", key)
         export_configs(raw, template_dir, (plan["gnb"]["lon"], plan["gnb"]["lat"]),
                        (plan["ue"]["lon"], plan["ue"]["lat"]),
-                       plan["gnb"]["height_m"], plan["ue"]["height_m"], plan["bdem"])
+                       plan["gnb"]["height_m"], plan["ue"]["height_m"], plan["bdem"],
+                       templates=templates)
         for m in mcs_list:
             os.makedirs(os.path.join(raw, f"mcs_{m}"))
         entries.append({"key": key, "name": plan["name"], "region": plan["region"],
@@ -146,6 +155,7 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR)
     manifest = {
         "created": datetime.now().isoformat(timespec="seconds"),
         "plans": entries, "mcs": mcs_list, "sinr_db": sinr_list,
+        "templates": {"gnb": templates[GNB_CONF], "ue": templates[UE_CONF]},
         "runs": len(entries) * len(mcs_list) * len(sinr_list),
     }
     with open(os.path.join(root, "manifest.json"), "w", encoding="utf-8") as f:
@@ -166,15 +176,13 @@ def run_dir(root, key, mcs, sinr):
     return os.path.join(root, "raw", key, f"mcs_{mcs}", f"sinr_{sinr:g}")
 
 
-def _set_key(text, key, value):
-    """Overwrite every `key = value;` in text. None if the key is not there."""
-    new, n = re.subn(rf"(\b{key}\s*=\s*)[^;\n]*", lambda m: m.group(1) + value, text)
-    return new if n else None
-
-
 def write_run_confs(root, key, mcs, sinr):
-    """Write this run's gNB and UE .conf into its own folder, with the MCS pinned (gNB) and the
-    noise level for the target SINR set in both channel entries. Returns (gnb_path, ue_path).
+    """Write this run's gNB and UE .conf into its own folder, with the noise level for the target
+    SINR set on the UPLINK only (BLOCK_UE_SIDE: UE transmits, gNB receives). The downlink entry
+    keeps the template's noise and gets BULK_DL_GAIN_DB of signal gain (as ploss_dB) so the UE can
+    sync over the plan's terrain channel. Returns (gnb_path, ue_path).
+    The MCS is NOT written here: the gNB runs in --phy-test, where the GUI passes it on the command
+    line (-m DL, -t UL) and the phy-test scheduler uses it as a fixed MCS for every transmission.
     Raises ValueError naming the missing key if a conf has no place for a value."""
     out = run_dir(root, key, mcs, sinr)
     os.makedirs(out, exist_ok=True)
@@ -183,17 +191,16 @@ def write_run_confs(root, key, mcs, sinr):
     for name in (GNB_CONF, UE_CONF):
         with open(os.path.join(root, "raw", key, name), encoding="utf-8") as f:
             text = f.read()
-        if name == GNB_CONF:
-            for k in BULK_MCS_KEYS:
-                text = _set_key(text, k, str(mcs))
-                if text is None:
-                    raise ValueError(f"'{k}' not found in the gNB conf, so the MCS cannot be set")
-        for block in (BLOCK_GNB_SIDE, BLOCK_UE_SIDE):
-            filled = fill_block(text, block, {BULK_NOISE_KEY: noise})
-            if filled is None:
-                raise ValueError(f"'{BULK_NOISE_KEY}' not found in {block} of {name}, "
-                                 f"so the SINR cannot be set")
-            text = filled
+        filled = fill_block(text, BLOCK_UE_SIDE, {BULK_NOISE_KEY: noise})
+        if filled is None:
+            raise ValueError(f"'{BULK_NOISE_KEY}' not found in {BLOCK_UE_SIDE} of {name}, "
+                             f"so the uplink SINR cannot be set")
+        text = filled
+        filled = fill_block(text, BLOCK_GNB_SIDE, {"ploss_dB": f"{BULK_DL_GAIN_DB:.2f}"})
+        if filled is None:
+            raise ValueError(f"'ploss_dB' not found in {BLOCK_GNB_SIDE} of {name}, "
+                             f"so the downlink gain cannot be set")
+        text = filled
         path = os.path.join(out, name)
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)

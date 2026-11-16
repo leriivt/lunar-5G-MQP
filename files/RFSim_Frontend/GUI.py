@@ -286,7 +286,11 @@ class MainWindow(QMainWindow):
         parent = SAVE_DIR          # the "Run output" save directory; the bulk folder is created inside it
         try:
             os.makedirs(parent, exist_ok=True)
-            self.bulk_dir = make_bulk_run(parent, plans, mcs, sinr)
+            # build every run from the gNB/UE .conf selected above, i.e. the same cell config
+            # as Start gNB / Start UE; only the plan's channel geometry and the noise change per run
+            self.bulk_dir = make_bulk_run(parent, plans, mcs, sinr,
+                                          gnb_template=self._gnb_conf_path(),
+                                          ue_template=self._ue_conf_path())
         except OSError as err:
             QMessageBox.critical(self, "Bulk run", f"Could not create the folder:\n{err}")
             return False
@@ -353,7 +357,7 @@ class MainWindow(QMainWindow):
         self._bulk_samples = {"dl": [], "ul": [], "snr": []}
         self.bulk_status.setText(f"Run {self._bulk_i + 1}/{len(self._bulk_queue)}: {key}, "
                                  f"MCS {mcs}, target SINR {sinr:g} dB (starting gNB)")
-        self.start_gnb()
+        self.start_gnb(mcs=mcs)
         self._later(self.settle_s.value() * 1000, self._bulk_start_ue)
 
     def _bulk_start_ue(self):
@@ -488,8 +492,9 @@ class MainWindow(QMainWindow):
             self.save_dir_edit.setText(SAVE_DIR)
 
     # ---- 1. gNB ---------------------------------------------------------------
-    def start_gnb(self):
-        """Launch nr-softmodem in RFSim mode with the selected gNB .conf."""
+    def start_gnb(self, mcs=None):
+        """Launch nr-softmodem in RFSim phy-test mode with the selected gNB .conf.
+        mcs: fixed DL and UL MCS (phy-test -m / -t); None keeps the script's default (9)."""
         if self.p_gnb is not None and self.p_gnb.state() != QProcess.ProcessState.NotRunning:
             return
         self.p_gnb = QProcess()
@@ -501,7 +506,10 @@ class MainWindow(QMainWindow):
         process.errorOccurred.connect(
             lambda error: self._process_error("gNB", process, error)
         )
-        process.start("bash", [GNB_MAKE, self._gnb_conf_path()])
+        args = [GNB_MAKE, self._gnb_conf_path()]
+        if mcs is not None:
+            args += [str(mcs), str(mcs)]
+        process.start("bash", args)
         self._gnb_start_time = time.time()
         self.start_timer()  # Start the timer to refresh stats
         self.gnb_status.setText("gNB: Starting")

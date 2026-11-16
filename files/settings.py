@@ -74,11 +74,19 @@ BLOCK_UE_SIDE = "rfsimu_channel_ue0"     # TX = UE,  RX = gNB (swapped)
 # ----------------------------------------------------------------------------
 # Bulk data collection: how a run's MCS and SINR are written into the .conf files
 # ----------------------------------------------------------------------------
-BULK_MCS_KEYS = ("dl_min_mcs", "dl_max_mcs", "ul_max_mcs")   # gNB conf keys set to the run's MCS (pins it)
-BULK_NOISE_KEY = "noise_power_dB"        # key inside each rfsimu_channel_* entry
+# The run's MCS is not written to the conf: the gNB runs in --phy-test and gets it as -m (DL) / -t (UL)
+# on the command line (RFSim_Frontend/.sh/gnb-bictr-gui.sh), which fixes the MCS for every transmission.
+BULK_NOISE_KEY = "noise_power_dB"        # key inside the uplink rfsimu_channel_* entry (BLOCK_UE_SIDE); bulk runs
+                                         # sweep the UPLINK SINR only, the downlink keeps the template's noise
 BULK_NOISE_AT_0DB_SINR = -0.7           # CALIBRATE: noise_power_dB that gives ~0 dB SINR on your link.
                                          # A run's noise is BULK_NOISE_AT_0DB_SINR - target SINR. The measured
                                          # UL SNR is logged next to the target, so you can check the mapping.
+BULK_DL_GAIN_DB = 18.0                   # downlink only (BLOCK_GNB_SIDE): written as ploss_dB, which rfsim applies as a
+                                         # signal GAIN of 10^(ploss_dB/20) (noise is added separately). bictr's terrain
+                                         # FIR leaves the DL signal weak, so the UE's SSS metric falls under OAI's fixed
+                                         # floor (SSS_METRIC_FLOOR_NR = 30000) and it never syncs; Haworth with the DEM
+                                         # gave ~7000. The metric scales with amplitude, so >12.6 dB is needed; 18 dB
+                                         # leaves margin for the random fading. The UL (what bulk runs sweep) is untouched.
 BULK_SETTLE_S = 15                       # seconds after starting the gNB before the UE is started
 BULK_ATTACH_S = 20                       # seconds after starting the UE before measuring
 BULK_MEASURE_S = 30                      # seconds of live-stats sampling per run
