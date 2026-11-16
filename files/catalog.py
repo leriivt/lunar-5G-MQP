@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 # package layout: use `from .settings import ...`
-from settings import (CANDIDATES_CSV, GNB_DEFAULTS_CSV, POLE_BDEM, REGION_ALIASES, REGION_DIR,
-                      SITES_CSV, TERRAIN_DIR)
+from settings import (BUNDLE_DIR, CANDIDATES_CSV, GNB_DEFAULTS_CSV, REGION_ALIASES, REGION_DIR,
+                      SITES_CSV)
 
 
 class Site(NamedTuple):
@@ -75,16 +75,14 @@ def load_catalog(path=SITES_CSV):
 
 
 def find_bdem(stem):
-    """Region-specific .bdem in terrain/ if present, else the pole-wide file, else the
-    expected region path (reported as missing by the app)."""
-    if os.path.isdir(TERRAIN_DIR):
-        for fname in sorted(os.listdir(TERRAIN_DIR)):
-            if fname.lower().endswith(".bdem") and stem.lower() in fname.lower():
-                return os.path.abspath(os.path.join(TERRAIN_DIR, fname))
-        pole = os.path.join(TERRAIN_DIR, POLE_BDEM)
-        if os.path.exists(pole):
-            return os.path.abspath(pole)
-    return os.path.abspath(os.path.join(TERRAIN_DIR, f"{stem}.bdem"))
+    """The region's bictr terrain file: <Region>__dem.bdem next to its <Region>__dem.tif
+    (generated from the TIFF by make_region_bdems.py). If it hasn't been generated yet, the
+    expected path is returned and the app reports it as missing."""
+    for folder in (REGION_DIR, os.path.join(BUNDLE_DIR, "regions")):
+        path = os.path.join(folder, f"{stem}__dem.bdem")
+        if os.path.exists(path):
+            return os.path.abspath(path)
+    return os.path.abspath(os.path.join(REGION_DIR, f"{stem}__dem.bdem"))
 
 
 def load_candidates(path=CANDIDATES_CSV):

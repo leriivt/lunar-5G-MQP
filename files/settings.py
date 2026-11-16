@@ -17,8 +17,9 @@ POLE_DEM = os.path.join(ATLAS_DIR, "pole_dem_160m.tif")
 REGION_DIR = os.path.join(ATLAS_DIR, "regions")                          # <Region>__dem.tif
 CANDIDATES_CSV = os.path.join(APP_DIR, "data", "atlas_base", "candidates_freeze.csv")
 SITES_CSV = os.path.join(APP_DIR, "sites.csv")                           # id,name,lat_deg,lon_deg
-TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # your .bdem files
-POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific .bdem
+TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # legacy: .bdem files now sit next to
+                                                                         # their region TIFFs (find_bdem)
+POLE_BDEM = "lunar_south_pole.bdem"      # legacy, unused: covers lat -60..-30, not the pole
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
 TEMPLATE_DIR = os.path.join(APP_DIR, "Templates")                       # OAI gNB/UE .conf templates filled on export
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m

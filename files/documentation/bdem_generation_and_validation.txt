@@ -1,0 +1,133 @@
+REGION DEM -> BICTR .BDEM: GENERATION AND VALIDATION
+=====================================================
+Date: 2026-11-16
+Script: files/make_region_bdems.py
+Output: files/atlas_v2/bundle/context/regions/<Region>__dem.bdem (next to each <Region>__dem.tif)
+
+
+1. WHY THIS WAS NEEDED
+----------------------
+- OAI's BICTR_LUNAR channel (openair1/SIMULATION/TOOLS/bictr_channel.c, bictr_dem_load) only
+  reads its own BDEM format: a regular longitude/latitude grid of float32 heights. It cannot
+  read GeoTIFFs.
+- The atlas region DEMs (atlas_v2/bundle/context/regions/*__dem.tif) are 20 m/pixel GeoTIFFs in
+  south polar stereographic metres, so they must be reprojected, not just converted.
+- Before this, only terrain/08_Haworth.bdem existed, and it covers only part of the Haworth tile
+  (lon -29.5..-17.9, lat -87.08..-86.42; the TIFF spans lon -42.3..-7.1, lat -87.7..-85.7).
+- The fallback terrain/lunar_south_pole.bdem is NOT polar: its header says lat -60..-30,
+  lon 0..45 (an SLDEM mid-latitude tile). bictr returns 0 m height outside a DEM, so every other
+  region was silently simulated on flat terrain.
+
+
+2. BDEM FORMAT (as read by bictr_dem_load / bictr_dem_get_height)
+-----------------------------------------------------------------
+Little-endian:
+    b"BDEM"                                        4 bytes magic
+    int32 n_lon, int32 n_lat                       grid size
+    float64 min_lon, max_lon, min_lat, max_lat     bounds (grid points sit exactly on them)
+    float32 heights[n_lat][n_lon]                  row 0 = min_lat, column 0 = min_lon, metres
+Pixel size = (max - min) / (n - 1). bictr interpolates bilinearly between grid points.
+
+
+3. HOW THE CONVERSION WORKS
+---------------------------
+For each <Region>__dem.tif:
+  1. Read heights and georeference with the project's own GeoTIFF reader (raster._geotags).
+  2. Find the lon/lat extent with raster.raster_lonlat_extent (64 x 64 edge samples).
+  3. Build a lon/lat grid with ~20 m spacing:
+       - latitude step  = 20 m / (R * pi/180)                  (~30.3 km per degree)
+       - longitude step = 20 m / (R * pi/180 * cos(mid lat))   (1 deg lon shrinks toward the pole)
+       R = BODY_RADIUS_M = 1,737,400 m
+  4. Project every grid point to stereographic x, y with the same formulas as
+     geo_math.lonlat_to_xy, and sample the TIFF bilinearly between pixel centres.
+  5. Grid points outside the TIFF (corners of a lon/lat box around a stereographic tile) take the
+     nearest edge height, so the file never contains NaN.
+  6. Write to <name>.part, then rename, so an interrupted run never leaves a half-written file.
+
+Run:
+    cd files
+    python3 make_region_bdems.py              # all regions (skips files that exist)
+    python3 make_region_bdems.py Haworth      # selected regions
+    python3 make_region_bdems.py --force      # rebuild
+
+
+4. VALIDATION SEQUENCE
+----------------------
+Step 1: Convention check on Haworth (before converting anything else)
+  Three independent height lookups at 2000 random (lon, lat) points inside each DEM:
+    a. TIFF via the project's Raster class (nearest pixel, raster.Raster + xy_to_frac)
+    b. new Haworth__dem.bdem read back with bictr's exact formula (bictr_dem_get_height)
+    c. old terrain/08_Haworth.bdem read the same way
+  Result:
+    NEW Haworth__dem.bdem vs TIFF : median |diff| 0.8 m, 95% 2.7 m, max  6.5 m
+    OLD 08_Haworth.bdem   vs TIFF : median |diff| 0.8 m, 95% 3.1 m, max 16.9 m
+    NEW height range -4022..2842 m = TIFF range -4022..2842 m, NaN cells: 0
+  Conclusion: axis orientation and row order match what bictr already reads (the old file agrees
+  with the TIFF the same way). The ~1 m median is nearest-pixel vs bilinear on 20 m data.
+
+Step 2: Generate all regions (18 s total, 397 MB)
+    Region               grid (lon x lat)   lon range            lat range           size
+    Amundsen_Rim         2368 x 2336        61.134..76.614       -84.983..-83.444    22 MB
+    Connecting_Ridge     6135 x 1954        -180.000..180.000    -90.000..-88.712    48 MB  (pole)
+    Faustini_Rim_A       2460 x 1955        68.273..111.727      -88.506..-87.217    19 MB
+    Haworth              3039 x 3009        -42.270..-7.093      -87.727..-85.744    37 MB
+    Malapert_Massif      2187 x 1970        -10.529..9.967       -86.615..-85.317    17 MB
+    Mons_Mouton_Plateau  5783 x 5543        12.278..50.593       -86.116..-82.461   128 MB
+    Mons_Mouton          2260 x 2274        22.700..41.348       -86.167..-84.669    21 MB
+    Nobile_Rim_1         2571 x 2598        26.945..48.225       -86.288..-84.576    27 MB
+    Nobile_Rim_2         2506 x 2499        50.708..66.382       -84.774..-83.127    25 MB
+    Peak_near_Cabeus_B   2395 x 2393        -75.464..-61.209     -84.430..-82.852    23 MB
+    Slater_Plain         2523 x 2585        109.439..143.085     -88.019..-86.315    26 MB
+    de_Gerlache_Rim_2    2401 x 2423        -86.534..-36.278     -88.994..-87.396    23 MB
+
+Step 3: Check every region against its TIFF
+  1500 random points per region, inside the TIFF footprint, lookups (a) vs (b) from step 1:
+    Region               median   95%     max     NaN
+    Amundsen_Rim         0.8 m    3.0 m   5.8 m   0
+    Connecting_Ridge     1.1 m    4.4 m   8.0 m   0
+    Faustini_Rim_A       0.6 m    3.0 m   5.4 m   0
+    Haworth              0.8 m    2.7 m   6.1 m   0
+    Malapert_Massif      1.1 m    3.8 m   6.4 m   0
+    Mons_Mouton_Plateau  0.9 m    3.3 m   6.2 m   0
+    Mons_Mouton          0.9 m    3.3 m   6.5 m   0
+    Nobile_Rim_1         1.0 m    3.8 m   6.4 m   0
+    Nobile_Rim_2         0.7 m    3.1 m   6.1 m   0
+    Peak_near_Cabeus_B   1.1 m    3.6 m   6.8 m   0
+    Slater_Plain         0.6 m    2.4 m   5.2 m   0
+    de_Gerlache_Rim_2    0.7 m    2.7 m   6.2 m   0
+  All regions pass: heights within a few metres of the TIFF, no NaN.
+
+Step 4: Check the code picks the new files
+  - catalog.find_bdem(stem) (Qt planner) and lunar_site_planner.find_bdem(stem) (old planner)
+    return <Region>__dem.bdem next to the TIFF: all 12 regions resolve to existing files,
+    including the alias Leibnitz Beta Plateau -> Mons_Mouton.
+  - Unknown region ("Nowhere") returns the expected path, which does not exist, so the planners'
+    "Missing .bdem" warning still fires.
+  - Bulk run for plan "Haworth 2299 m" (plan file still stores terrain/08_Haworth.bdem):
+      manifest.json bdem      -> atlas_v2/bundle/context/regions/Haworth__dem.bdem
+      gNB and UE conf         -> bictr_dem_file = .../Haworth__dem.bdem in both channel blocks
+      DL ploss_dB 18.00, UL noise_power_dB -5.70 (unchanged by this work)
+      gNB (-29.2519, -86.6387) and UE (-28.8363, -86.7106) both inside the new DEM bounds
+
+
+5. CODE CHANGES
+---------------
+- make_region_bdems.py (new): the converter above.
+- catalog.py, lunar_site_planner.py: find_bdem() looks for <Region>__dem.bdem in the region
+  folders; the terrain/ search and the lunar_south_pole.bdem fallback were removed.
+- plans.py: make_bulk_run() uses find_bdem(plan["region"]) when that file exists, else the
+  plan's stored path; the DEM used is recorded per plan in manifest.json.
+- settings.py, lunar_site_planner.py: TERRAIN_DIR and POLE_BDEM marked legacy/unused.
+- .gitignore: files/atlas_v2/**/*.bdem (the TIFFs are tracked; these files can be regenerated).
+
+
+6. KNOWN LIMITATIONS
+--------------------
+- Connecting_Ridge contains the pole, so its grid spans every longitude. Heights are correct,
+  but bictr draws line-of-sight paths as straight lines in lon/lat: a link crossing the +-180 deg
+  line or passing very close to the pole follows the wrong path over the terrain.
+- Longitude spacing is set at each region's middle latitude, so cells are a little finer than
+  20 m on the poleward side and a little coarser on the other side.
+- Not yet checked inside OAI: a bictr run should log
+  "[BICTR] DEM loaded: .../<Region>__dem.bdem (n_lon x n_lat, lon [..] lat [..])"
+  and "DEM terrain mode" instead of "DEM load failed, falling back to flat terrain".

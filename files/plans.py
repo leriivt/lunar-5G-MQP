@@ -20,6 +20,7 @@ from datetime import datetime
 import csv
 import re
 
+from catalog import find_bdem
 from export import export_configs, fill_block, make_run_folder, run_folder_name
 from settings import (BLOCK_GNB_SIDE, BLOCK_UE_SIDE, BULK_DL_GAIN_DB, BULK_NOISE_AT_0DB_SINR,
                       BULK_NOISE_KEY, GNB_CONF, PLANS_DIR, TEMPLATE_DIR, UE_CONF)
@@ -142,13 +143,17 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
         key = os.path.splitext(os.path.basename(plan["file"]))[0]
         shutil.copy2(plan["file"], os.path.join(root, "plans", key + ".json"))
         raw = os.path.join(root, "raw", key)
+        # the region's full .bdem (next to its TIFF) if it has been generated, so older plans that
+        # stored another path (e.g. terrain/08_Haworth.bdem, which covers only part of Haworth) use it too
+        region_dem = find_bdem(plan["region"])
+        dem = region_dem if os.path.exists(region_dem) else plan["bdem"]
         export_configs(raw, template_dir, (plan["gnb"]["lon"], plan["gnb"]["lat"]),
                        (plan["ue"]["lon"], plan["ue"]["lat"]),
-                       plan["gnb"]["height_m"], plan["ue"]["height_m"], plan["bdem"],
+                       plan["gnb"]["height_m"], plan["ue"]["height_m"], dem,
                        templates=templates)
         for m in mcs_list:
             os.makedirs(os.path.join(raw, f"mcs_{m}"))
-        entries.append({"key": key, "name": plan["name"], "region": plan["region"],
+        entries.append({"key": key, "name": plan["name"], "region": plan["region"], "bdem": dem,
                         "separation_m": plan.get("separation_m")})
     with open(os.path.join(root, "data", "bler_sinr_by_mcs.csv"), "w", encoding="utf-8") as f:
         f.write(",".join(DATA_COLUMNS) + "\n")
