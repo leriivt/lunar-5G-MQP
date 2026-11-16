@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 .DS_Store
 files/exports/
+files/RFSim_Frontend/saved_runs/
