@@ -53,6 +53,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("RFSim Frontend")
         self.resize(1000, 700)
+        self.sim_mode = True  # default simulation mode: true = RFSim, False = PHY test mode
         self._build_widgets()
 
         #-----gnb/ue processes----
@@ -67,7 +68,7 @@ class MainWindow(QMainWindow):
         self.dl_bler = 0
         self.snr = 0
         self._gnb_start_time = time.time()
-        self.sim_mode = True  # default simulation mode: true = RFSim, False = PHY test mode
+        
     # ---- layout --------------------------------------------------------------
     def _build_widgets(self):
         central = QWidget()
@@ -101,7 +102,7 @@ class MainWindow(QMainWindow):
         output_form.addRow("Save directory", self._path_row(self.save_dir_edit, self.browse_save_dir))
         layout.addWidget(output)
 
-        # Process controls: start/stop buttons and a status label per node
+        # Process controls: start/stop buttons and a status     label per node
         controls = QGroupBox("Processes")
         grid = QGridLayout(controls)
         self.gnb_status = QLabel("gNB: Stopped")
