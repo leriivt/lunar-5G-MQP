@@ -8,7 +8,9 @@ machine's NumPy 2). Written to <bulk folder>/data/bler_vs_snr.png.
 
 x = the run's measured UL SNR (ul_snr_db, already the mean over the run's samples).
 Runs that repeat the same plan, MCS and target SINR are merged into one point: mean SNR,
-mean BLER. Rows with no BLER or SNR (the UE never synced) are left out. With several site
+mean BLER. Rows with no BLER or SNR (the UE never synced) are left out, and so are rows
+whose "link" flag is not "ok" (plans.classify_link: no_sync, ta_drift); CSVs from before
+the flag existed have no "link" column and are plotted whole. With several site
 plans, each plan gets its own marker shape. BLER is on a linear 0..1 axis, ticks every 0.1.
 """
 import csv
@@ -24,7 +26,7 @@ CSV_NAME = "bler_sinr_by_mcs.csv"
 Y_STEP = 0.1                     # BLER axis: 0..1, a tick and grid line every Y_STEP
 WIDTH, HEIGHT = 1100, 700
 LEGEND_W = 230
-MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 70, 20, 50, 60
+MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 70, 20, 64, 60
 
 
 def _num(text):
@@ -35,10 +37,16 @@ def _num(text):
 
 
 def load_curves(csv_path, y_col="ul_bler"):
-    """{(plan, mcs): [(mean SNR, mean BLER), ...] sorted by SNR}, one point per target SINR."""
+    """({(plan, mcs): [(mean SNR, mean BLER), ...] sorted by SNR}, {flag: runs left out}),
+    one point per target SINR."""
     acc = defaultdict(list)
+    skipped = defaultdict(int)
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            link = (row.get("link") or "ok").strip()
+            if link != "ok":
+                skipped[link] += 1
+                continue
             snr, y = _num(row.get("ul_snr_db")), _num(row.get(y_col))
             mcs, target = _num(row.get("mcs")), _num(row.get("target_sinr_db"))
             if None in (snr, y, mcs):
@@ -48,7 +56,7 @@ def load_curves(csv_path, y_col="ul_bler"):
     for (plan, mcs, _target), pts in acc.items():
         curves[(plan, mcs)].append((sum(p[0] for p in pts) / len(pts),
                                     sum(p[1] for p in pts) / len(pts)))
-    return {key: sorted(pts) for key, pts in curves.items()}
+    return {key: sorted(pts) for key, pts in curves.items()}, dict(skipped)
 
 
 def mcs_color(mcs):
@@ -174,8 +182,8 @@ def plot_bulk(root):
     csv_path = os.path.join(root, "data", CSV_NAME)
     if not os.path.isfile(csv_path):
         return []
-    curves = load_curves(csv_path)
-    if not curves:
+    curves, skipped = load_curves(csv_path)
+    if not curves and not skipped:
         return []
     plans = sorted({plan for plan, _ in curves})
     shapes = {plan: i % 4 for i, plan in enumerate(plans)}
@@ -187,6 +195,13 @@ def plot_bulk(root):
                 "Measured UL SNR (dB, mean over the run)",
                 f"UL BLER vs UL SNR: {os.path.basename(os.path.normpath(root))}", shapes)
     _draw_legend(p, WIDTH - LEGEND_W + 20, 80, sorted({m for _, m in curves}), plans, shapes)
+    n_ok = sum(len(v) for v in curves.values())
+    note = f"{n_ok} point(s) plotted"
+    if skipped:
+        note += "; flagged runs left out: " + ", ".join(f"{n} {k}" for k, n in sorted(skipped.items()))
+    p.setPen(QColor("#555"))
+    p.setFont(QFont("Sans", 9))
+    p.drawText(QRectF(0, 42, WIDTH - LEGEND_W, 18), Qt.AlignmentFlag.AlignHCenter, note)
     p.end()
     path = os.path.join(root, "data", "bler_vs_snr.png")
     img.save(path)

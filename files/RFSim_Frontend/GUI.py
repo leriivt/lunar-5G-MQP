@@ -24,10 +24,12 @@ from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGridLay
 # GUI.py sits in a subfolder; plans.py, settings.py, export.py and the planner are one level up
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_run, parse_mcs,
-                   RAW_TEMPLATE_KEY, run_dir, set_ul_sinr, sinr_points, write_plan_confs, write_raw_confs,
+                   RAW_TEMPLATE_KEY, classify_link, run_dir, set_ul_sinr, sinr_points, write_plan_confs, write_raw_confs,
                    write_run_confs)
-from bulk_plot import plot_bulk
-from settings import APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, PLANS_DIR
+from bulk_plot import load_curves, plot_bulk
+from live_graph import BlerSnrGraph, LiveGraph
+from settings import (APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, BULK_TA_RETRIES,
+                      PLANS_DIR)
 
 # ----------------------------------------------------------------------------
 # SETTINGS
@@ -61,6 +63,10 @@ UL_RE = re.compile(r"ulsch_rounds ([\d/]+), ulsch_DTX \d+, ulsch_errors (\d+)")
 DL_MCS_RE = re.compile(r"dlsch_rounds .*MCS (\d+)")
 UL_MCS_RE = re.compile(r"ulsch_rounds .*MCS (\d+)")
 # "ulsch_power[0] 50,0 ulsch_noise_power[0] 30.8" (OAI prints the first value with a comma)
+# link health: PUSCH attempts the gNB found empty (DTX), its RSRP for the UE, and the UE's TA total
+UL_DTX_RE = re.compile(r"ulsch_rounds ([\d/]+), ulsch_DTX (\d+)")
+RSRP_RE = re.compile(r"average RSRP (-?\d+)")
+TA_RE = re.compile(r"TA total (-?\d+)")
 UL_SNR_RE = re.compile(r"ulsch_power\[0\] (\d+[.,]\d) ulsch_noise_power\[0\] (\d+[.,]\d)")
 # nr-uesoftmodem prints this once it has synced to the gNB (executables/nr-ue.c). In phy-test the
 # gNB schedules the UE from the moment it starts, so everything before this line is DTX, not data.
@@ -76,7 +82,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RFSim Frontend")
-        self.resize(1000, 900)
+        self.resize(1000, 820)
         self._build_widgets()
 
         #-----gnb/ue processes----
@@ -114,18 +120,14 @@ class MainWindow(QMainWindow):
 
         form.addRow("gNB .conf", self._path_row(self.gnb_conf, self.browse_gnb_config))
         form.addRow("UE .conf", self._path_row(self.ue_conf, self.browse_ue_config))
-        layout.addWidget(configs)
-
-        # Run output directory
-        output = QGroupBox("Run output")
-        output_form = QFormLayout(output)
+        # run output directory: a row of this box rather than its own box, to save height
         self.save_dir_edit = QLineEdit(SAVE_DIR)
         self.save_dir_edit.setReadOnly(True)
-        output_form.addRow("Save directory", self._path_row(self.save_dir_edit, self.browse_save_dir))
-        layout.addWidget(output)
+        form.addRow("Save directory", self._path_row(self.save_dir_edit, self.browse_save_dir))
+        layout.addWidget(configs)
 
         layout.addWidget(self._build_plans_group())
-        layout.addWidget(self._build_bulk_group())
+        bulk = self._build_bulk_group()
 
         # Process controls: start/stop buttons and a status label per node
         controls = QGroupBox("Processes")
@@ -157,7 +159,11 @@ class MainWindow(QMainWindow):
             mcs_sinr.addWidget(box)
         mcs_sinr.addStretch()
         grid.addLayout(mcs_sinr, 2, 0, 1, 3)
-        layout.addWidget(controls)
+        # manual runs (Processes) and bulk runs side by side, to leave room for the logs/graph
+        runs_row = QHBoxLayout()
+        runs_row.addWidget(controls, 1)
+        runs_row.addWidget(bulk, 2)
+        layout.addLayout(runs_row)
         self._restore_bulk_settings()       # bulk + manual settings from the last session
 
         # Live stats: one value label per metric
@@ -179,6 +185,16 @@ class MainWindow(QMainWindow):
         self.ue_log = QPlainTextEdit(readOnly=True)
         self.logs.addTab(self.gnb_log, "gNB output")
         self.logs.addTab(self.ue_log, "UE output")
+        # Live graph tab: BLER / UL SNR / MCS over time (left), UL BLER vs mean UL SNR (right)
+        self.graph = LiveGraph()
+        self.bler_graph = BlerSnrGraph()
+        graph_tab = QWidget()
+        graph_row = QHBoxLayout(graph_tab)
+        graph_row.setContentsMargins(0, 0, 0, 0)
+        graph_row.setSpacing(4)
+        graph_row.addWidget(self.graph, 3)
+        graph_row.addWidget(self.bler_graph, 2)
+        self.logs.addTab(graph_tab, "Live graph")
         layout.addWidget(self.logs, 1)
 
     # ---- bulk data collection ------------------------------------------------
@@ -264,6 +280,7 @@ class MainWindow(QMainWindow):
         self._bulk_running = False
         self._bulk_gen = 0              # bumped on abort so stale timers do nothing
         self._bulk_queue, self._bulk_i = [], 0
+        self._bulk_retry, self._bulk_redo = 0, False
         self._bulk_saved_confs = None
         return group
 
@@ -392,6 +409,9 @@ class MainWindow(QMainWindow):
         with open(os.path.join(self.bulk_dir, "manifest.json"), encoding="utf-8") as f:
             self._bulk_queue = build_queue(json.load(f))
         self._bulk_i = 0
+        self._bulk_retry = 0                      # attempts already redone for the current point
+        self._bulk_redo = False
+        self.bler_graph.set_curves({})            # this bulk run's points build up from empty
         self._bulk_saved_confs = (self.gnb_conf.text(), self.ue_conf.text())
         self._bulk_running = True
         self._bulk_gen += 1
@@ -458,9 +478,11 @@ class MainWindow(QMainWindow):
         self.gnb_conf.setText(gnb_conf)
         self.ue_conf.setText(ue_conf)
         self._bulk_samples = {"dl": [], "ul": [], "snr": []}
+        retry = f" [retry {self._bulk_retry}/{BULK_TA_RETRIES} after TA drift]" if self._bulk_retry else ""
         self.bulk_status.setText(f"Run {self._bulk_i + 1}/{len(self._bulk_queue)}: {key}, "
-                                 f"MCS {mcs}, target SINR {sinr:g} dB (starting gNB)")
+                                 f"MCS {mcs}, target SINR {sinr:g} dB{retry} (starting gNB)")
         self.start_gnb(mcs=mcs)
+        self.graph.set_target_sinr(sinr)
         self._later(self.settle_s.value() * 1000, self._bulk_start_ue)
 
     def _bulk_start_ue(self):
@@ -494,14 +516,33 @@ class MainWindow(QMainWindow):
         # live_stats counts BLER from the start of the measure window (or the UE's sync, if later),
         # so the last value is the window's BLER (empty if the UE never synced); SNR fluctuates,
         # so its samples over the same window are averaged.
+        ul_bler = s["ul"][-1] if s["ul"] else None
+        link = classify_link(ul_bler, self._max_abs_ta, self.rsrp)
         append_row(self.bulk_dir, {
-            "plan": key, "mcs": mcs, "target_sinr_db": f"{sinr:g}",
+            "plan": key, "mcs": mcs, "target_sinr_db": f"{sinr:g}", "link": link,
             "dl_bler": fmt(s["dl"][-1] if s["dl"] else None),
-            "ul_bler": fmt(s["ul"][-1] if s["ul"] else None),
+            "ul_bler": fmt(ul_bler),
             "ul_snr_db": fmt(sum(s["snr"]) / len(s["snr"]) if s["snr"] else None),
+            "ul_dtx_frac": fmt(self.ul_dtx_frac), "max_abs_ta": self._max_abs_ta,
+            "rsrp_db": "" if self.rsrp is None else self.rsrp,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")})
+        if link != "ok":
+            self.bulk_status.setText(self.bulk_status.text() + f"  [flagged: {link}]")
+        # timing-advance runaway is a simulator fault, not a channel result: run the point again
+        self._bulk_redo = link == "ta_drift" and self._bulk_retry < BULK_TA_RETRIES
+        if self._bulk_redo:
+            self.bulk_status.setText(self.bulk_status.text() +
+                                     f" - redoing ({self._bulk_retry + 1}/{BULK_TA_RETRIES})")
+        self.bler_graph.set_live(None)
+        try:
+            self.bler_graph.set_curves(load_curves(os.path.join(self.bulk_dir, "data",
+                                                                "bler_sinr_by_mcs.csv"))[0])
+        except (OSError, ValueError):
+            pass
         out = run_dir(self.bulk_dir, key, mcs, sinr)
         for name, log in (("gnb.log", self.gnb_log), ("ue.log", self.ue_log)):
+            if self._bulk_redo:     # keep the failed attempt's logs; gnb.log/ue.log = the last attempt
+                name = name.replace(".log", f"_ta_drift_{self._bulk_retry + 1}.log")
             try:
                 with open(os.path.join(out, name), "w", encoding="utf-8") as f:
                     f.write(log.toPlainText())
@@ -518,7 +559,11 @@ class MainWindow(QMainWindow):
         if busy and tries > 0:
             self._later(500, lambda: self._bulk_wait_stopped(tries - 1))
             return
-        self._bulk_i += 1
+        if self._bulk_redo:
+            self._bulk_retry += 1               # same point again
+        else:
+            self._bulk_i += 1
+            self._bulk_retry = 0
         self._later(2000, self._bulk_next)
 
     def start_timer(self):
@@ -626,6 +671,9 @@ class MainWindow(QMainWindow):
             args += [str(mcs), str(mcs)]
         process.start("bash", args)
         self._gnb_start_time = time.time()
+        self.graph.clear()
+        if not self._bulk_running:
+            self.graph.set_target_sinr(self._manual_sinr_value())
         self.dl_mcs = self.ul_mcs = None
         for key in ("DL MCS", "UL MCS"):
             self.stat_labels[key].setText("-")
@@ -727,11 +775,14 @@ class MainWindow(QMainWindow):
             if data:
                 text = bytes(data).decode(errors="replace")
                 self.ue_log.appendPlainText(text)
+                for ta in TA_RE.findall(text):
+                    self._max_abs_ta = max(self._max_abs_ta, abs(int(ta)))
                 if self._ue_sync_time is None:
                     # keep a short tail so a marker split across two reads is still found
                     seen = self._ue_tail + text
                     if UE_SYNC_MARK in seen:
                         self._ue_sync_time = time.time()
+                        self.graph.mark(self._ue_sync_time - self._gnb_start_time, "UE sync")
                         self.ue_log.appendPlainText("[GUI] UE synced: BLER/SNR averages start now")
                     self._ue_tail = seen[-len(UE_SYNC_MARK):]
 
@@ -797,6 +848,7 @@ class MainWindow(QMainWindow):
         self._baseline = {}            # "dl"/"ul" -> OAI counters [r0, r1, .., errors] at sync
         self._stats_valid = {"dl": False, "ul": False, "snr": False}
         self._measure_start = None     # bulk runs: wall time the measure window began
+        self._reset_health()
         if hasattr(self, "stat_labels"):
             for key in ("DL BLER", "UL BLER", "UL SNR (dB)"):
                 self.stat_labels[key].setText("waiting for UE")
@@ -809,8 +861,19 @@ class MainWindow(QMainWindow):
     def _restart_stats(self):
         """Start counting again from the next stats dump (the counters keep running in OAI)."""
         self._measure_start = time.time()
+        self.graph.mark(self._measure_start - self._gnb_start_time, "measure")
         self._baseline = {}
         self._stats_valid = {"dl": False, "ul": False, "snr": False}
+        self._reset_health()
+
+    def _reset_health(self):
+        """Link-health numbers for the CSV (TA and RSRP feed classify_link), same span as BLER."""
+        self._max_abs_ta = 0           # largest |TA total| the UE logged
+        self._snr_samples = []         # UL SNR values over the same span (live BLER-vs-SNR point)
+        if hasattr(self, "bler_graph"):
+            self.bler_graph.set_live(None)
+        self.ul_dtx_frac = None        # share of PUSCH attempts that were DTX
+        self.rsrp = None               # gNB's latest RSRP for the UE (dB)
 
     def live_stats(self):
         """Parse the gNB's stats dumps and update the live stats.
@@ -819,6 +882,9 @@ class MainWindow(QMainWindow):
         schedules the UE before it has synced, so those early slots all count as failures.
         Nothing is shown until the UE log says it synced; the first MAC dump written after
         that is the baseline, and BLER is computed from the counts since then."""
+        t = time.time() - self._gnb_start_time      # live graph time axis
+        if self.p_gnb is not None and self.p_gnb.state() != QProcess.ProcessState.NotRunning:
+            self.graph.tick(t)                       # freeze the axis once the gNB has stopped
         # MCS is a setting, not a running count, so it is shown as soon as the gNB reports it
         mac = self._read_stats_file(NR_MAC_STATS)
         if mac is not None:
@@ -827,6 +893,7 @@ class MainWindow(QMainWindow):
                 if m:
                     setattr(self, f"{name}_mcs", int(m.group(1)))
                     self.stat_labels[label].setText(m.group(1))
+                    self.graph.add(label, t, int(m.group(1)))
         if self._ue_sync_time is None:
             return
         mac = self._read_stats_file(NR_MAC_STATS, since=self._stats_since())
@@ -847,6 +914,18 @@ class MainWindow(QMainWindow):
                 setattr(self, f"{name}_bler", bler)
                 self._stats_valid[name] = True
                 self.stat_labels[label].setText(f"{bler:.3f}")
+                self.graph.add(label, t, bler)
+            m = UL_DTX_RE.search(mac)
+            if m:
+                counts = [sum(int(c) for c in m.group(1).split("/")), int(m.group(2))]  # attempts, DTX
+                base = self._baseline.get("ul_dtx")
+                if base is None or counts[0] < base[0] or counts[1] < base[1]:
+                    self._baseline["ul_dtx"] = counts
+                elif counts[0] > base[0]:
+                    self.ul_dtx_frac = (counts[1] - base[1]) / (counts[0] - base[0])
+            m = RSRP_RE.search(mac)
+            if m:
+                self.rsrp = int(m.group(1))
         l1 = self._read_stats_file(NR_L1_STATS, since=self._stats_since())
         if l1 is not None:
             m = UL_SNR_RE.search(l1)
@@ -855,6 +934,11 @@ class MainWindow(QMainWindow):
                 self.snr = power - noise
                 self._stats_valid["snr"] = True
                 self.stat_labels["UL SNR (dB)"].setText(f"{self.snr:.1f}")
+                self.graph.add("UL SNR", t, self.snr)
+                self._snr_samples.append(self.snr)
+        if self._stats_valid["ul"] and self._snr_samples:
+            self.bler_graph.set_live(sum(self._snr_samples) / len(self._snr_samples), self.ul_bler,
+                                     self.ul_mcs)
 
     def _read_stats_file(self, path, since=None):
         """Return the file's text, or None if it's missing or older than `since`

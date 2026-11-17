@@ -23,11 +23,14 @@ import re
 from catalog import find_bdem
 from export import export_configs, fill_block, make_run_folder, run_folder_name
 from settings import (BLOCK_GNB_SIDE, BLOCK_UE_SIDE, BULK_DL_GAIN_DB, BULK_NOISE_AT_0DB_SINR,
-                      BULK_NOISE_KEY, GNB_CONF, PLANS_DIR, TEMPLATE_DIR, UE_CONF)
+                      BULK_NOISE_KEY, GNB_CONF, LINK_MAX_ABS_TA, LINK_MIN_RSRP_DB,
+                      PLANS_DIR, TEMPLATE_DIR, UE_CONF)
 
 MCS_MIN, MCS_MAX = 0, 28             # NR MCS index range (table 1: 0-28; 256QAM table: 0-27)
 RAW_TEMPLATE_KEY = "raw_template"   # bulk "plan" used when no site plan is ticked: the templates as they are
-DATA_COLUMNS = ["plan", "mcs", "target_sinr_db", "dl_bler", "ul_bler", "ul_snr_db", "timestamp"]
+DATA_COLUMNS = ["plan", "mcs", "target_sinr_db", "link", "dl_bler", "ul_bler", "ul_snr_db",
+                "ul_dtx_frac", "max_abs_ta", "rsrp_db", "timestamp"]
+LINK_OK = "ok"                       # the only "link" value bulk_plot plots
 
 
 # ----------------------------------------------------------------------------
@@ -279,6 +282,23 @@ def write_run_confs(root, key, mcs, sinr):
             f.write(text)
         paths.append(path)
     return tuple(paths)
+
+
+def classify_link(ul_bler, max_abs_ta, rsrp_db):
+    """Health of one bulk run's link over its measure window (None = not measured):
+        no_sync   the UE never synced, so there is no BLER at all
+        ta_drift  the UE's timing advance ran away (|TA| > LINK_MAX_ABS_TA) or the gNB stopped
+                  hearing it (RSRP < LINK_MIN_RSRP_DB)
+        ok        none of the above
+    A high PUSCH DTX share is not a flag: OAI marks a PUSCH as DTX whenever it measures under
+    pusch_dtx_threshold (5 dB by default), so low-SNR runs have it too. It is still recorded in
+    the CSV (ul_dtx_frac)."""
+    if ul_bler is None:
+        return "no_sync"
+    if (max_abs_ta is not None and max_abs_ta > LINK_MAX_ABS_TA) or \
+            (rsrp_db is not None and rsrp_db < LINK_MIN_RSRP_DB):
+        return "ta_drift"
+    return LINK_OK
 
 
 def append_row(root, row):

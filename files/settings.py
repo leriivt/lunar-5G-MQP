@@ -88,6 +88,13 @@ BULK_DL_GAIN_DB = 18.0                   # downlink only (BLOCK_GNB_SIDE): writt
                                          # floor (SSS_METRIC_FLOOR_NR = 30000) and it never syncs; Haworth with the DEM
                                          # gave ~7000. The metric scales with amplitude, so >12.6 dB is needed; 18 dB
                                          # leaves margin for the random fading. The UL (what bulk runs sweep) is untouched.
+# Each bulk run gets a "link" flag (plans.classify_link); only "ok" runs are plotted.
+LINK_MAX_ABS_TA = 16                     # |TA total| (UE log, units of ~0.26 us) above which the UE's uplink timing
+                                         # has drifted ("ta_drift"); rfsim has no delay, so the right TA is 0
+LINK_MIN_RSRP_DB = -80                   # gNB's RSRP for the UE below which it no longer hears it ("ta_drift" too:
+                                         # healthy runs read about -44, runaway-TA runs -100 or lower)
+BULK_TA_RETRIES = 3                      # a bulk point flagged "ta_drift" is run again up to this many times
+                                         # (each attempt's row stays in the CSV with its flag; only "ok" rows plot)
 BULK_SETTLE_S = 15                       # seconds after starting the gNB before the UE is started
 BULK_ATTACH_S = 20                       # seconds after starting the UE before measuring
 BULK_MEASURE_S = 30                      # seconds of live-stats sampling per run
