@@ -79,7 +79,7 @@ BLOCK_UE_SIDE = "rfsimu_channel_ue0"     # TX = UE,  RX = gNB (swapped)
 # on the command line (RFSim_Frontend/.sh/gnb-bictr-gui.sh), which fixes the MCS for every transmission.
 BULK_NOISE_KEY = "noise_power_dB"        # key inside the uplink rfsimu_channel_* entry (BLOCK_UE_SIDE); bulk runs
                                          # sweep the UPLINK SINR only, the downlink keeps the template's noise
-BULK_NOISE_AT_0DB_SINR = -0.7           # CALIBRATE: noise_power_dB that gives ~0 dB SINR on your link.
+BULK_NOISE_AT_0DB_SINR = 0           # CALIBRATE: noise_power_dB that gives ~0 dB SINR on your link.
                                          # A run's noise is BULK_NOISE_AT_0DB_SINR - target SINR. The measured
                                          # UL SNR is logged next to the target, so you can check the mapping.
 BULK_DL_GAIN_DB = 18.0                   # downlink only (BLOCK_GNB_SIDE): written as ploss_dB, which rfsim applies as a

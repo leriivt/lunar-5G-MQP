@@ -14,10 +14,11 @@ import re
 import time
 from pathlib import Path
 from PyQt6.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox,
                              QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                              QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
-                             QTabWidget,
+                             QTabWidget, QDialog, QScrollArea,
                              QVBoxLayout, QWidget, QFileDialog)
 
 # GUI.py sits in a subfolder; plans.py, settings.py, export.py and the planner are one level up
@@ -25,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_run, parse_mcs,
                    RAW_TEMPLATE_KEY, run_dir, set_ul_sinr, sinr_points, write_plan_confs, write_raw_confs,
                    write_run_confs)
+from bulk_plot import plot_bulk
 from settings import APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, PLANS_DIR
 
 # ----------------------------------------------------------------------------
@@ -412,6 +414,35 @@ class MainWindow(QMainWindow):
         self.bulk_start_btn.setEnabled(True)
         self.bulk_abort_btn.setEnabled(False)
         self.bulk_status.setText(f"{message}. Data: {os.path.join(self.bulk_dir, 'data')}")
+        self.show_bulk_plots(self.bulk_dir)
+
+    def show_bulk_plots(self, root):
+        """Plot UL BLER vs measured UL SNR (all points on one graph, a curve per MCS) and show it.
+        Also runs after an abort, with whatever rows were recorded."""
+        try:
+            paths = plot_bulk(root)
+        except (OSError, ValueError) as err:
+            self.bulk_status.setText(self.bulk_status.text() + f"\nPlot failed: {err}")
+            return
+        if not paths:
+            self.bulk_status.setText(self.bulk_status.text() + "\nNo BLER rows to plot.")
+            return
+        self.bulk_status.setText(self.bulk_status.text() + f"\nPlots: {os.path.dirname(paths[0])}")
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"BLER vs SNR: {os.path.basename(root)}")
+        inner = QWidget()
+        column = QVBoxLayout(inner)
+        for path in paths:
+            label = QLabel()
+            label.setPixmap(QPixmap(path))
+            label.setToolTip(path)
+            column.addWidget(label)
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        QVBoxLayout(dialog).addWidget(scroll)
+        dialog.resize(1140, 760)
+        dialog.show()
+        self._plot_dialog = dialog            # keep a reference so it stays open
 
     def _bulk_next(self):
         if self._bulk_i >= len(self._bulk_queue):
@@ -440,6 +471,7 @@ class MainWindow(QMainWindow):
     def _bulk_measure_begin(self):
         self.bulk_status.setText(self.bulk_status.text().replace("UE attaching", "measuring"))
         self._bulk_left = self.measure_s.value()
+        self._restart_stats()      # BLER baseline = first MAC dump in the measure window
         self._bulk_sample()
 
     def _bulk_sample(self):
@@ -459,8 +491,9 @@ class MainWindow(QMainWindow):
         key, mcs, sinr = self._bulk_queue[self._bulk_i]
         s = self._bulk_samples
         fmt = lambda v: f"{v:.6f}" if v is not None else ""
-        # live_stats counts BLER from the UE's sync onwards, so the last value is the run's BLER
-        # (empty if the UE never synced); SNR fluctuates, so it is averaged.
+        # live_stats counts BLER from the start of the measure window (or the UE's sync, if later),
+        # so the last value is the window's BLER (empty if the UE never synced); SNR fluctuates,
+        # so its samples over the same window are averaged.
         append_row(self.bulk_dir, {
             "plan": key, "mcs": mcs, "target_sinr_db": f"{sinr:g}",
             "dl_bler": fmt(s["dl"][-1] if s["dl"] else None),
@@ -763,9 +796,21 @@ class MainWindow(QMainWindow):
         self._ue_tail = ""
         self._baseline = {}            # "dl"/"ul" -> OAI counters [r0, r1, .., errors] at sync
         self._stats_valid = {"dl": False, "ul": False, "snr": False}
+        self._measure_start = None     # bulk runs: wall time the measure window began
         if hasattr(self, "stat_labels"):
             for key in ("DL BLER", "UL BLER", "UL SNR (dB)"):
                 self.stat_labels[key].setText("waiting for UE")
+
+    def _stats_since(self):
+        """Stats dumps older than this are ignored: the UE's sync, or in a bulk run the start of
+        the measure window if that is later (so BLER and SNR cover the same window)."""
+        return max(self._ue_sync_time, self._measure_start or 0.0)
+
+    def _restart_stats(self):
+        """Start counting again from the next stats dump (the counters keep running in OAI)."""
+        self._measure_start = time.time()
+        self._baseline = {}
+        self._stats_valid = {"dl": False, "ul": False, "snr": False}
 
     def live_stats(self):
         """Parse the gNB's stats dumps and update the live stats.
@@ -784,7 +829,7 @@ class MainWindow(QMainWindow):
                     self.stat_labels[label].setText(m.group(1))
         if self._ue_sync_time is None:
             return
-        mac = self._read_stats_file(NR_MAC_STATS, since=self._ue_sync_time)
+        mac = self._read_stats_file(NR_MAC_STATS, since=self._stats_since())
         if mac is not None:
             for name, regex, label in (("dl", DL_RE, "DL BLER"), ("ul", UL_RE, "UL BLER")):
                 m = regex.search(mac)
@@ -802,7 +847,7 @@ class MainWindow(QMainWindow):
                 setattr(self, f"{name}_bler", bler)
                 self._stats_valid[name] = True
                 self.stat_labels[label].setText(f"{bler:.3f}")
-        l1 = self._read_stats_file(NR_L1_STATS, since=self._ue_sync_time)
+        l1 = self._read_stats_file(NR_L1_STATS, since=self._stats_since())
         if l1 is not None:
             m = UL_SNR_RE.search(l1)
             if m:
