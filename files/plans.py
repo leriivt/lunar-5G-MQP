@@ -117,6 +117,39 @@ def sinr_points(lo, hi, step):
 # ----------------------------------------------------------------------------
 # Bulk run folder
 # ----------------------------------------------------------------------------
+def plan_dem(plan):
+    """The .bdem to simulate a plan on: the region's full file (next to its TIFF) if it has been
+    generated, so older plans that stored another path (e.g. terrain/08_Haworth.bdem, which covers
+    only part of Haworth) use it too; otherwise the plan's stored path."""
+    region_dem = find_bdem(plan["region"])
+    return region_dem if os.path.exists(region_dem) else plan["bdem"]
+
+
+def write_plan_confs(out_dir, plan, gnb_template, ue_template, template_dir=TEMPLATE_DIR):
+    """Manual Start gNB / Start UE with a site plan: the selected gNB/UE .conf with the plan's
+    channel geometry and DEM (as in bulk runs) and the bulk runs' downlink gain, so the UE can
+    sync over the terrain. The noise is left as in the templates. Returns (gnb_path, ue_path)."""
+    for path in (gnb_template, ue_template):
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"template .conf not found: {path}")
+    export_configs(out_dir, template_dir, (plan["gnb"]["lon"], plan["gnb"]["lat"]),
+                   (plan["ue"]["lon"], plan["ue"]["lat"]),
+                   plan["gnb"]["height_m"], plan["ue"]["height_m"], plan_dem(plan),
+                   templates={GNB_CONF: gnb_template, UE_CONF: ue_template})
+    paths = []
+    for name in (GNB_CONF, UE_CONF):
+        path = os.path.join(out_dir, name)
+        with open(path, encoding="utf-8") as f:
+            text = fill_block(f.read(), BLOCK_GNB_SIDE, {"ploss_dB": f"{BULK_DL_GAIN_DB:.2f}"})
+        if text is None:
+            raise ValueError(f"'ploss_dB' not found in {BLOCK_GNB_SIDE} of {name}, "
+                             f"so the downlink gain cannot be set")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        paths.append(path)
+    return tuple(paths)
+
+
 def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
                   gnb_template=None, ue_template=None):
     """Create <parent>/bulk_<date>_<time>/ and fill it:
@@ -143,10 +176,7 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
         key = os.path.splitext(os.path.basename(plan["file"]))[0]
         shutil.copy2(plan["file"], os.path.join(root, "plans", key + ".json"))
         raw = os.path.join(root, "raw", key)
-        # the region's full .bdem (next to its TIFF) if it has been generated, so older plans that
-        # stored another path (e.g. terrain/08_Haworth.bdem, which covers only part of Haworth) use it too
-        region_dem = find_bdem(plan["region"])
-        dem = region_dem if os.path.exists(region_dem) else plan["bdem"]
+        dem = plan_dem(plan)
         export_configs(raw, template_dir, (plan["gnb"]["lon"], plan["gnb"]["lat"]),
                        (plan["ue"]["lon"], plan["ue"]["lat"]),
                        plan["gnb"]["height_m"], plan["ue"]["height_m"], dem,

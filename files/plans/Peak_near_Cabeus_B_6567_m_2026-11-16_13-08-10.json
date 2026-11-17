@@ -1,0 +1,18 @@
+{
+  "name": "Peak near Cabeus B 6567 m",
+  "region": "Peak_near_Cabeus_B",
+  "region_label": "Peak near Cabeus B",
+  "gnb": {
+    "lon": -71.9099,
+    "lat": -83.3537,
+    "height_m": 4.0
+  },
+  "ue": {
+    "lon": -70.14563705339619,
+    "lat": -83.42906863096128,
+    "height_m": 1.5
+  },
+  "bdem": "/home/lunar5g/Desktop/lunar-5G-MQP/files/atlas_v2/bundle/context/regions/Peak_near_Cabeus_B__dem.bdem",
+  "separation_m": 6567.1,
+  "saved": "2026-11-16T13:08:10"
+}

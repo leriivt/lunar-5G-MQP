@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGridLay
 # GUI.py sits in a subfolder; plans.py, settings.py, export.py and the planner are one level up
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_run, parse_mcs,
-                   run_dir, sinr_points, write_run_confs)
+                   run_dir, sinr_points, write_plan_confs, write_run_confs)
 from settings import APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, PLANS_DIR
 
 # ----------------------------------------------------------------------------
@@ -55,6 +55,9 @@ DL_RE = re.compile(r"dlsch_rounds ([\d/]+), dlsch_errors (\d+)")
 UL_RE = re.compile(r"ulsch_rounds ([\d/]+), ulsch_DTX \d+, ulsch_errors (\d+)")
 # "ulsch_power[0] 50,0 ulsch_noise_power[0] 30.8" (OAI prints the first value with a comma)
 UL_SNR_RE = re.compile(r"ulsch_power\[0\] (\d+[.,]\d) ulsch_noise_power\[0\] (\d+[.,]\d)")
+# nr-uesoftmodem prints this once it has synced to the gNB (executables/nr-ue.c). In phy-test the
+# gNB schedules the UE from the moment it starts, so everything before this line is DTX, not data.
+UE_SYNC_MARK = "Got synch:"
 
 DEFAULT_SAVE_DIR = os.path.join(Path(__file__).parent, "saved_runs")
 SAVE_DIR = DEFAULT_SAVE_DIR
@@ -80,6 +83,8 @@ class MainWindow(QMainWindow):
         self.ul_bler = 0 
         self.dl_bler = 0
         self.snr = 0
+        self._reset_attach()
+        self._manual_confs = None   # (plan file, (gnb_conf, ue_conf)) of the last manual plan run
         self._gnb_start_time = time.time()
         self.sim_mode = True  # default simulation mode: true for RFSim, False for PHY test mode
     # ---- layout --------------------------------------------------------------
@@ -371,14 +376,13 @@ class MainWindow(QMainWindow):
         self._bulk_sample()
 
     def _bulk_sample(self):
-        """Once a second: note the stats if the gNB's dump files are fresh."""
-        mac, l1 = self._read_stats_file(NR_MAC_STATS), self._read_stats_file(NR_L1_STATS)
+        """Once a second: note the stats, but only those counted since the UE synced."""
         s = self._bulk_samples
-        if mac and DL_RE.search(mac):
+        if self._stats_valid["dl"]:
             s["dl"].append(self.dl_bler)
-        if mac and UL_RE.search(mac):
+        if self._stats_valid["ul"]:
             s["ul"].append(self.ul_bler)
-        if l1 and UL_SNR_RE.search(l1):
+        if self._stats_valid["snr"]:
             s["snr"].append(self.snr)
         self._bulk_left -= 1
         self._later(1000, self._bulk_sample if self._bulk_left > 0 else self._bulk_finish_run)
@@ -388,8 +392,8 @@ class MainWindow(QMainWindow):
         key, mcs, sinr = self._bulk_queue[self._bulk_i]
         s = self._bulk_samples
         fmt = lambda v: f"{v:.6f}" if v is not None else ""
-        # BLER counters in OAI's dumps are cumulative since the gNB started, so the last value is
-        # the run's BLER; SNR fluctuates, so it is averaged.
+        # live_stats counts BLER from the UE's sync onwards, so the last value is the run's BLER
+        # (empty if the UE never synced); SNR fluctuates, so it is averaged.
         append_row(self.bulk_dir, {
             "plan": key, "mcs": mcs, "target_sinr_db": f"{sinr:g}",
             "dl_bler": fmt(s["dl"][-1] if s["dl"] else None),
@@ -497,6 +501,8 @@ class MainWindow(QMainWindow):
         mcs: fixed DL and UL MCS (phy-test -m / -t); None keeps the script's default (9)."""
         if self.p_gnb is not None and self.p_gnb.state() != QProcess.ProcessState.NotRunning:
             return
+        if not self._bulk_running and self._manual_plan_confs(check_only=True) is False:
+            return
         self.p_gnb = QProcess()
         process = self.p_gnb
         process.readyReadStandardOutput.connect(self._read_gnb_output)
@@ -506,11 +512,19 @@ class MainWindow(QMainWindow):
         process.errorOccurred.connect(
             lambda error: self._process_error("gNB", process, error)
         )
-        args = [GNB_MAKE, self._gnb_conf_path()]
+        conf = self._gnb_conf_path()
+        if not self._bulk_running:                  # manual run: use the ticked site plan, if any
+            confs = self._manual_plan_confs(new=True)
+            if confs is False:
+                return
+            if confs:
+                conf = confs[0]
+        args = [GNB_MAKE, conf]
         if mcs is not None:
             args += [str(mcs), str(mcs)]
         process.start("bash", args)
         self._gnb_start_time = time.time()
+        self._reset_attach()
         self.start_timer()  # Start the timer to refresh stats
         self.gnb_status.setText("gNB: Starting")
   
@@ -520,6 +534,13 @@ class MainWindow(QMainWindow):
         """Launch nr-uesoftmodem in RFSim mode with the selected UE .conf."""
         if self.p_ue is not None and self.p_ue.state() != QProcess.ProcessState.NotRunning:
             return
+        conf = self._ue_conf_path()
+        if not self._bulk_running:                  # manual run: same plan confs as the gNB
+            confs = self._manual_plan_confs(new=False)
+            if confs is False:
+                return
+            if confs:
+                conf = confs[1]
         self.p_ue = QProcess()
         process = self.p_ue
         process.readyReadStandardOutput.connect(self._read_ue_output)
@@ -530,8 +551,40 @@ class MainWindow(QMainWindow):
             lambda error: self._process_error("UE", process, error)
         )
         
-        process.start("bash", [UE_MAKE, self._ue_conf_path()])
+        self._reset_attach()
+        process.start("bash", [UE_MAKE, conf])
         self.ue_status.setText("UE: Starting")
+
+    def _manual_plan_confs(self, new=False, check_only=False):
+        """Confs for a manual run built from the ticked site plan.
+
+        None  = no plan ticked: use the gNB/UE .conf boxes as they are.
+        False = more than one plan ticked (the user was told): don't start.
+        (gnb_conf, ue_conf) otherwise, written to <save dir>/manual/<plan>/ from the selected
+        .conf files with the plan's channel geometry and DEM (plans.write_plan_confs).
+        new=True (Start gNB) rebuilds them; Start UE reuses the gNB's pair for the same plan."""
+        plans = self.checked_plans()
+        if len(plans) > 1:
+            QMessageBox.warning(self, "Site plan", "Tick only one site plan for Start gNB / Start UE "
+                                "(or none to use the .conf files as they are).")
+            return False
+        if not plans or check_only:
+            return None
+        plan = plans[0]
+        if not new and self._manual_confs and self._manual_confs[0] == plan["file"] \
+                and all(os.path.exists(p) for p in self._manual_confs[1]):
+            return self._manual_confs[1]
+        key = os.path.splitext(os.path.basename(plan["file"]))[0]
+        try:
+            confs = write_plan_confs(os.path.join(SAVE_DIR, "manual", key), plan,
+                                     self._gnb_conf_path(), self._ue_conf_path())
+        except (OSError, ValueError) as err:
+            QMessageBox.critical(self, "Site plan", f"Could not build the confs for {plan['name']}:\n{err}")
+            return False
+        self._manual_confs = (plan["file"], confs)
+        for log in (self.gnb_log, self.ue_log):
+            log.appendPlainText(f"[GUI] site plan '{plan['name']}': {os.path.dirname(confs[0])}")
+        return confs
 
     def _gnb_conf_path(self):
         return self.gnb_conf.text()
@@ -551,7 +604,15 @@ class MainWindow(QMainWindow):
         if process is not None:
             data = process.readAllStandardOutput() + process.readAllStandardError()
             if data:
-                self.ue_log.appendPlainText(bytes(data).decode(errors="replace"))
+                text = bytes(data).decode(errors="replace")
+                self.ue_log.appendPlainText(text)
+                if self._ue_sync_time is None:
+                    # keep a short tail so a marker split across two reads is still found
+                    seen = self._ue_tail + text
+                    if UE_SYNC_MARK in seen:
+                        self._ue_sync_time = time.time()
+                        self.ue_log.appendPlainText("[GUI] UE synced: BLER/SNR averages start now")
+                    self._ue_tail = seen[-len(UE_SYNC_MARK):]
 
     def _gnb_finished(self, process):
         if self.p_gnb is process:
@@ -608,32 +669,57 @@ class MainWindow(QMainWindow):
 
     # ---- 4. BLER / SNR live stats --------------------------------------------
 
+    def _reset_attach(self):
+        """Forget the UE's sync: stats wait for the next 'Got synch' before counting."""
+        self._ue_sync_time = None      # wall time the UE synced, None = not yet
+        self._ue_tail = ""
+        self._baseline = {}            # "dl"/"ul" -> OAI counters [r0, r1, .., errors] at sync
+        self._stats_valid = {"dl": False, "ul": False, "snr": False}
+        if hasattr(self, "stat_labels"):
+            for key in ("DL BLER", "UL BLER", "UL SNR (dB)"):
+                self.stat_labels[key].setText("waiting for UE")
+
     def live_stats(self):
-        """Parse the gNB's stats dumps and update the lives stats inside"""
-        mac = self._read_stats_file(NR_MAC_STATS)
+        """Parse the gNB's stats dumps and update the live stats.
+
+        OAI's HARQ counters are cumulative since the gNB started, and in phy-test the gNB
+        schedules the UE before it has synced, so those early slots all count as failures.
+        Nothing is shown until the UE log says it synced; the first MAC dump written after
+        that is the baseline, and BLER is computed from the counts since then."""
+        if self._ue_sync_time is None:
+            return
+        mac = self._read_stats_file(NR_MAC_STATS, since=self._ue_sync_time)
         if mac is not None:
-            dl = DL_RE.search(mac)
-            if dl:
-                self.dl_bler = self._bler(*dl.groups())
-                self.stat_labels["DL BLER"].setText(f"{self.dl_bler:.3f}")
-            ul = UL_RE.search(mac)
-            if ul:
-                self.ul_bler = self._bler(*ul.groups())
-                self.stat_labels["UL BLER"].setText(f"{self.ul_bler:.3f}")
-        l1 = self._read_stats_file(NR_L1_STATS)
+            for name, regex, label in (("dl", DL_RE, "DL BLER"), ("ul", UL_RE, "UL BLER")):
+                m = regex.search(mac)
+                if not m:
+                    continue
+                counts = [int(c) for c in m.group(1).split("/")] + [int(m.group(2))]
+                base = self._baseline.get(name)
+                if base is None or len(base) != len(counts) or any(c < b for c, b in zip(counts, base)):
+                    self._baseline[name] = counts          # first dump after sync (or counters reset)
+                    continue
+                delta = [c - b for c, b in zip(counts, base)]
+                if delta[0] == 0:
+                    continue                               # no new first transmissions yet
+                bler = self._bler("/".join(map(str, delta[:-1])), delta[-1])
+                setattr(self, f"{name}_bler", bler)
+                self._stats_valid[name] = True
+                self.stat_labels[label].setText(f"{bler:.3f}")
+        l1 = self._read_stats_file(NR_L1_STATS, since=self._ue_sync_time)
         if l1 is not None:
             m = UL_SNR_RE.search(l1)
             if m:
                 power, noise = (float(g.replace(",", ".")) for g in m.groups())
                 self.snr = power - noise
+                self._stats_valid["snr"] = True
                 self.stat_labels["UL SNR (dB)"].setText(f"{self.snr:.1f}")
 
-
-
-    def _read_stats_file(self, path):
-        """ return the file's text, or NINE if its missing or left over frim the previous run"""
+    def _read_stats_file(self, path, since=None):
+        """Return the file's text, or None if it's missing or older than `since`
+        (default: the gNB start, i.e. left over from the previous run)."""
         try:
-            if os.path.getmtime(path) < self._gnb_start_time:
+            if os.path.getmtime(path) < (self._gnb_start_time if since is None else since):
                 return None
             with open(path) as f:
                 return f.read()
