@@ -53,6 +53,9 @@ STOP_ALL = os.path.join(SH_DIR, "stop-all.sh")
 # "UE 1234: dlsch_rounds 270/31/22/19, dlsch_errors 17, ..."
 DL_RE = re.compile(r"dlsch_rounds ([\d/]+), dlsch_errors (\d+)")
 UL_RE = re.compile(r"ulsch_rounds ([\d/]+), ulsch_DTX \d+, ulsch_errors (\d+)")
+# same lines end in "... BLER 0.00000 MCS 9": the MCS the gNB is currently using
+DL_MCS_RE = re.compile(r"dlsch_rounds .*MCS (\d+)")
+UL_MCS_RE = re.compile(r"ulsch_rounds .*MCS (\d+)")
 # "ulsch_power[0] 50,0 ulsch_noise_power[0] 30.8" (OAI prints the first value with a comma)
 UL_SNR_RE = re.compile(r"ulsch_power\[0\] (\d+[.,]\d) ulsch_noise_power\[0\] (\d+[.,]\d)")
 # nr-uesoftmodem prints this once it has synced to the gNB (executables/nr-ue.c). In phy-test the
@@ -83,6 +86,7 @@ class MainWindow(QMainWindow):
         self.ul_bler = 0 
         self.dl_bler = 0
         self.snr = 0
+        self.dl_mcs = self.ul_mcs = None
         self._reset_attach()
         self._manual_confs = None   # (plan file, (gnb_conf, ue_conf)) of the last manual plan run
         self._gnb_start_time = time.time()
@@ -134,7 +138,7 @@ class MainWindow(QMainWindow):
         stats = QGroupBox("Live stats")
         stats_row = QHBoxLayout(stats)
         self.stat_labels = {}
-        for key in ("DL BLER", "UL BLER", "DL SNR (dB)", "UL SNR (dB)"):
+        for key in ("DL MCS", "UL MCS", "DL BLER", "UL BLER", "DL SNR (dB)", "UL SNR (dB)"):
             value = QLabel("-")
             self.stat_labels[key] = value
             stats_row.addWidget(QLabel(f"{key}:"))
@@ -243,19 +247,17 @@ class MainWindow(QMainWindow):
                                      "'Save site plan for bulk run...'.")
 
     def refresh_plans(self):
-        """Reload the plan list, keeping the ticks of plans that are still there."""
+        """Reload the plan list, keeping the ticks of plans that are still there (all unticked at startup)."""
         ticked = {self.plan_list.item(i).data(Qt.ItemDataRole.UserRole)
                   for i in range(self.plan_list.count())
                   if self.plan_list.item(i).checkState() == Qt.CheckState.Checked}
-        first_load = self.plan_list.count() == 0
         self.plan_list.clear()
         for plan in load_plans():
             item = QListWidgetItem(f"{plan['name']}  [{plan['region_label']}, "
                                    f"{plan.get('separation_m', '?')} m]")
             item.setData(Qt.ItemDataRole.UserRole, plan["file"])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            checked = plan["file"] in ticked or first_load
-            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            item.setCheckState(Qt.CheckState.Checked if plan["file"] in ticked else Qt.CheckState.Unchecked)
             self.plan_list.addItem(item)
         self.plan_note.setText(f"{self.plan_list.count()} saved plan(s) in {PLANS_DIR}")
 
@@ -524,6 +526,9 @@ class MainWindow(QMainWindow):
             args += [str(mcs), str(mcs)]
         process.start("bash", args)
         self._gnb_start_time = time.time()
+        self.dl_mcs = self.ul_mcs = None
+        for key in ("DL MCS", "UL MCS"):
+            self.stat_labels[key].setText("-")
         self._reset_attach()
         self.start_timer()  # Start the timer to refresh stats
         self.gnb_status.setText("gNB: Starting")
@@ -686,6 +691,14 @@ class MainWindow(QMainWindow):
         schedules the UE before it has synced, so those early slots all count as failures.
         Nothing is shown until the UE log says it synced; the first MAC dump written after
         that is the baseline, and BLER is computed from the counts since then."""
+        # MCS is a setting, not a running count, so it is shown as soon as the gNB reports it
+        mac = self._read_stats_file(NR_MAC_STATS)
+        if mac is not None:
+            for name, regex, label in (("dl", DL_MCS_RE, "DL MCS"), ("ul", UL_MCS_RE, "UL MCS")):
+                m = regex.search(mac)
+                if m:
+                    setattr(self, f"{name}_mcs", int(m.group(1)))
+                    self.stat_labels[label].setText(m.group(1))
         if self._ue_sync_time is None:
             return
         mac = self._read_stats_file(NR_MAC_STATS, since=self._ue_sync_time)
@@ -775,6 +788,8 @@ class MainWindow(QMainWindow):
             f.write(f"Run saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"gNB config: {self._gnb_conf_path()}\n")
             f.write(f"UE config: {self._ue_conf_path()}\n")
+            f.write(f"DL MCS: {self.dl_mcs}\n")
+            f.write(f"UL MCS: {self.ul_mcs}\n")
             f.write(f"DL BLER: {self.dl_bler:.5f}\n")
             f.write(f"UL BLER: {self.ul_bler:.5f}\n")
             f.write(f"SNR: {self.snr:.5f} dB\n")
