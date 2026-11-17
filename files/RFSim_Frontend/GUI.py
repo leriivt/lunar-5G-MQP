@@ -23,7 +23,8 @@ from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGridLay
 # GUI.py sits in a subfolder; plans.py, settings.py, export.py and the planner are one level up
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_run, parse_mcs,
-                   run_dir, sinr_points, write_plan_confs, write_run_confs)
+                   RAW_TEMPLATE_KEY, run_dir, set_ul_sinr, sinr_points, write_plan_confs, write_raw_confs,
+                   write_run_confs)
 from settings import APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, PLANS_DIR
 
 # ----------------------------------------------------------------------------
@@ -98,8 +99,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # Config files: one row per node, path box + Browse
-        configs = QGroupBox("Config files")
+        # Config templates: one row per node, path box + Browse. Manual and bulk runs build their
+        # confs from these with the ticked site plan(s); with no plan ticked they run as they are.
+        configs = QGroupBox("Config templates")
         form = QFormLayout(configs)
         last = self._load_last_confs()
         self.gnb_conf = QLineEdit(last.get("gnb_conf", DEFAULT_GNB_CONF))
@@ -120,6 +122,7 @@ class MainWindow(QMainWindow):
         output_form.addRow("Save directory", self._path_row(self.save_dir_edit, self.browse_save_dir))
         layout.addWidget(output)
 
+        layout.addWidget(self._build_plans_group())
         layout.addWidget(self._build_bulk_group())
 
         # Process controls: start/stop buttons and a status label per node
@@ -133,7 +136,27 @@ class MainWindow(QMainWindow):
             grid.addWidget(status, row, 0)
             grid.addWidget(self._button(f"Start {name}", start), row, 1)
         grid.addWidget(self._button("Stop all", self.stop_all), 0, 2, 2, 1)
+        # manual-run MCS / SINR (bulk runs set their own per run)
+        self.manual_mcs = QSpinBox()
+        self.manual_mcs.setRange(0, 28)
+        self.manual_mcs.setValue(9)
+        self.manual_mcs.setToolTip("phy-test fixed MCS for DL and UL (-m / -t), applied on Start gNB")
+        self.manual_sinr = QDoubleSpinBox()
+        self.manual_sinr.setRange(-51.0, 100.0)       # the minimum shows as "template"
+        self.manual_sinr.setDecimals(1)
+        self.manual_sinr.setSuffix(" dB")
+        self.manual_sinr.setSpecialValueText("template")
+        self.manual_sinr.setValue(self.manual_sinr.minimum())
+        self.manual_sinr.setToolTip("Target UPLINK SINR, set as noise_power_dB like bulk runs. "
+                                    "'template' (lowest value) keeps the template's noise.")
+        mcs_sinr = QHBoxLayout()
+        for label, box in (("MCS", self.manual_mcs), ("UL SINR", self.manual_sinr)):
+            mcs_sinr.addWidget(QLabel(label))
+            mcs_sinr.addWidget(box)
+        mcs_sinr.addStretch()
+        grid.addLayout(mcs_sinr, 2, 0, 1, 3)
         layout.addWidget(controls)
+        self._restore_bulk_settings()       # bulk + manual settings from the last session
 
         # Live stats: one value label per metric
         stats = QGroupBox("Live stats")
@@ -157,10 +180,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.logs, 1)
 
     # ---- bulk data collection ------------------------------------------------
-    def _build_bulk_group(self):
-        """Site plans (made in the planner), MCS list, SINR range, output folder."""
+    def _build_plans_group(self):
+        """Site plans made in the planner: used by manual runs (one ticked) and bulk runs."""
         os.makedirs(PLANS_DIR, exist_ok=True)
-        group = QGroupBox("Bulk data collection (BLER / SINR vs MCS)")
+        group = QGroupBox("Site plans (none ticked = config templates as they are)")
         v = QVBoxLayout(group)
 
         top = QHBoxLayout()
@@ -175,6 +198,17 @@ class MainWindow(QMainWindow):
         v.addWidget(self.plan_list)
         self.plan_note = QLabel()
         v.addWidget(self.plan_note)
+
+        # new plans saved from the planner show up without pressing Refresh
+        self.plan_watcher = QFileSystemWatcher([PLANS_DIR], self)
+        self.plan_watcher.directoryChanged.connect(lambda _path: self.refresh_plans())
+        self.refresh_plans()
+        return group
+
+    def _build_bulk_group(self):
+        """MCS list, SINR range and timing; runs every ticked site plan (or the raw templates)."""
+        group = QGroupBox("Bulk data collection (BLER / SINR vs MCS)")
+        v = QVBoxLayout(group)
 
         form = QFormLayout()
         self.mcs_edit = QLineEdit("0-27")
@@ -224,21 +258,16 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.bulk_status, 1)
         v.addLayout(bottom)
 
-        # new plans saved from the planner show up without pressing Refresh
-        self.plan_watcher = QFileSystemWatcher([PLANS_DIR], self)
-        self.plan_watcher.directoryChanged.connect(lambda _path: self.refresh_plans())
         self.bulk_dir = None
         self._bulk_running = False
         self._bulk_gen = 0              # bumped on abort so stale timers do nothing
         self._bulk_queue, self._bulk_i = [], 0
         self._bulk_saved_confs = None
-        self.refresh_plans()
-        self._restore_bulk_settings()
         return group
 
     def _bulk_setting_widgets(self):
-        """name -> widget for every bulk-run setting kept between sessions (plan ticks are not kept)."""
-        return {"mcs": self.mcs_edit, "sinr_min": self.sinr_min, "sinr_max": self.sinr_max,
+        """name -> widget for every run setting kept between sessions (plan ticks are not kept)."""
+        return {"manual_mcs": self.manual_mcs, "manual_sinr": self.manual_sinr, "mcs": self.mcs_edit, "sinr_min": self.sinr_min, "sinr_max": self.sinr_max,
                 "sinr_step": self.sinr_step, "settle_s": self.settle_s,
                 "attach_s": self.attach_s, "measure_s": self.measure_s}
 
@@ -317,18 +346,14 @@ class MainWindow(QMainWindow):
 
     def create_bulk_run(self):
         """Validate the inputs, then create the timestamped folder for raw runs and data."""
-        plans = self.checked_plans()
-        if not plans:
-            QMessageBox.warning(self, "Bulk run", "Tick at least one site plan "
-                                "(open the site planner to make some).")
-            return False
+        plans = self.checked_plans()      # none ticked: run the raw templates (plans.RAW_TEMPLATE_KEY)
         try:
             mcs = parse_mcs(self.mcs_edit.text())
             sinr = sinr_points(self.sinr_min.value(), self.sinr_max.value(), self.sinr_step.value())
         except ValueError as err:
             QMessageBox.warning(self, "Bulk run", str(err))
             return False
-        runs = len(plans) * len(mcs) * len(sinr)
+        runs = max(len(plans), 1) * len(mcs) * len(sinr)
         parent = SAVE_DIR          # the "Run output" save directory; the bulk folder is created inside it
         try:
             os.makedirs(parent, exist_ok=True)
@@ -340,7 +365,8 @@ class MainWindow(QMainWindow):
         except OSError as err:
             QMessageBox.critical(self, "Bulk run", f"Could not create the folder:\n{err}")
             return False
-        self.bulk_status.setText(f"Created {self.bulk_dir}\n{len(plans)} plan(s) x {len(mcs)} MCS x "
+        what = f"{len(plans)} plan(s)" if plans else "raw template (no site plan)"
+        self.bulk_status.setText(f"Created {self.bulk_dir}\n{what} x {len(mcs)} MCS x "
                                  f"{len(sinr)} SINR points = {runs} runs")
         return True
 
@@ -539,7 +565,8 @@ class MainWindow(QMainWindow):
     # ---- 1. gNB ---------------------------------------------------------------
     def start_gnb(self, mcs=None):
         """Launch nr-softmodem in RFSim phy-test mode with the selected gNB .conf.
-        mcs: fixed DL and UL MCS (phy-test -m / -t); None keeps the script's default (9)."""
+        mcs: fixed DL and UL MCS (phy-test -m / -t); bulk runs pass theirs, manual runs use the
+        Processes box's MCS."""
         if self.p_gnb is not None and self.p_gnb.state() != QProcess.ProcessState.NotRunning:
             return
         if not self._bulk_running and self._manual_plan_confs(check_only=True) is False:
@@ -560,6 +587,7 @@ class MainWindow(QMainWindow):
                 return
             if confs:
                 conf = confs[0]
+            mcs = self.manual_mcs.value()
         args = [GNB_MAKE, conf]
         if mcs is not None:
             args += [str(mcs), str(mcs)]
@@ -599,35 +627,51 @@ class MainWindow(QMainWindow):
         process.start("bash", [UE_MAKE, conf])
         self.ue_status.setText("UE: Starting")
 
-    def _manual_plan_confs(self, new=False, check_only=False):
-        """Confs for a manual run built from the ticked site plan.
+    def _manual_sinr_value(self):
+        """The manual UL SINR target in dB, or None for 'template' (keep the template's noise)."""
+        box = self.manual_sinr
+        return None if box.value() <= box.minimum() else box.value()
 
-        None  = no plan ticked: use the gNB/UE .conf boxes as they are.
-        False = more than one plan ticked (the user was told): don't start.
-        (gnb_conf, ue_conf) otherwise, written to <save dir>/manual/<plan>/ from the selected
-        .conf files with the plan's channel geometry and DEM (plans.write_plan_confs).
-        new=True (Start gNB) rebuilds them; Start UE reuses the gNB's pair for the same plan."""
+    def _manual_plan_confs(self, new=False, check_only=False):
+        """Confs for a manual run: the config templates plus the ticked site plan and UL SINR.
+
+        None  = no plan ticked and SINR 'template': use the config templates as they are.
+        False = more than one plan ticked, or the confs could not be written (the user was told).
+        (gnb_conf, ue_conf) otherwise, written to <save dir>/manual/<plan or raw_template>/:
+        the plan's channel geometry, DEM and DL gain (plans.write_plan_confs), then the UL noise
+        for the SINR target (plans.set_ul_sinr).
+        new=True (Start gNB) rebuilds them; Start UE reuses the gNB's pair if nothing changed."""
         plans = self.checked_plans()
         if len(plans) > 1:
             QMessageBox.warning(self, "Site plan", "Tick only one site plan for Start gNB / Start UE "
-                                "(or none to use the .conf files as they are).")
+                                "(or none to use the config templates as they are).")
             return False
-        if not plans or check_only:
+        plan = plans[0] if plans else None
+        sinr = self._manual_sinr_value()
+        if check_only or (plan is None and sinr is None):
             return None
-        plan = plans[0]
-        if not new and self._manual_confs and self._manual_confs[0] == plan["file"] \
+        ident = (plan["file"] if plan else None, sinr, self._gnb_conf_path(), self._ue_conf_path())
+        if not new and self._manual_confs and self._manual_confs[0] == ident \
                 and all(os.path.exists(p) for p in self._manual_confs[1]):
             return self._manual_confs[1]
-        key = os.path.splitext(os.path.basename(plan["file"]))[0]
+        key = os.path.splitext(os.path.basename(plan["file"]))[0] if plan else RAW_TEMPLATE_KEY
+        out = os.path.join(SAVE_DIR, "manual", key)
         try:
-            confs = write_plan_confs(os.path.join(SAVE_DIR, "manual", key), plan,
-                                     self._gnb_conf_path(), self._ue_conf_path())
+            if plan:
+                confs = write_plan_confs(out, plan, self._gnb_conf_path(), self._ue_conf_path())
+            else:
+                confs = write_raw_confs(out, self._gnb_conf_path(), self._ue_conf_path())
+            if sinr is not None:
+                for path in confs:
+                    set_ul_sinr(path, sinr)
         except (OSError, ValueError) as err:
-            QMessageBox.critical(self, "Site plan", f"Could not build the confs for {plan['name']}:\n{err}")
+            QMessageBox.critical(self, "Manual run", f"Could not build the run's confs:\n{err}")
             return False
-        self._manual_confs = (plan["file"], confs)
+        self._manual_confs = (ident, confs)
+        what = f"site plan '{plan['name']}'" if plan else "config templates"
+        what += f", UL SINR {sinr:g} dB" if sinr is not None else ", template noise"
         for log in (self.gnb_log, self.ue_log):
-            log.appendPlainText(f"[GUI] site plan '{plan['name']}': {os.path.dirname(confs[0])}")
+            log.appendPlainText(f"[GUI] {what}: {out}")
         return confs
 
     def _gnb_conf_path(self):

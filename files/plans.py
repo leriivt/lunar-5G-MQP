@@ -26,6 +26,7 @@ from settings import (BLOCK_GNB_SIDE, BLOCK_UE_SIDE, BULK_DL_GAIN_DB, BULK_NOISE
                       BULK_NOISE_KEY, GNB_CONF, PLANS_DIR, TEMPLATE_DIR, UE_CONF)
 
 MCS_MIN, MCS_MAX = 0, 28             # NR MCS index range (table 1: 0-28; 256QAM table: 0-27)
+RAW_TEMPLATE_KEY = "raw_template"   # bulk "plan" used when no site plan is ticked: the templates as they are
 DATA_COLUMNS = ["plan", "mcs", "target_sinr_db", "dl_bler", "ul_bler", "ul_snr_db", "timestamp"]
 
 
@@ -158,6 +159,8 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
         plans/                     copies of the chosen plan files
         raw/<plan>/                gNB + UE .conf for that plan, plus one empty mcs_<N>/ folder
                                    per MCS for raw logs
+                                   (no plans: one raw/raw_template/ with the templates unchanged:
+                                   no plan geometry, DEM or DL gain, only the per-run UL noise)
         data/bler_sinr_by_mcs.csv  header only; the collector appends one row per measurement
 
     gnb_template / ue_template: the .conf files to build each run from (the GUI passes the ones
@@ -172,6 +175,15 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
     os.makedirs(os.path.join(root, "plans"))
     os.makedirs(os.path.join(root, "data"))
     entries = []
+    if not plans:
+        raw = os.path.join(root, "raw", RAW_TEMPLATE_KEY)
+        os.makedirs(raw)
+        for name, src in templates.items():
+            shutil.copy2(src, os.path.join(raw, name))
+        for m in mcs_list:
+            os.makedirs(os.path.join(raw, f"mcs_{m}"))
+        entries.append({"key": RAW_TEMPLATE_KEY, "name": "Raw template (no site plan)",
+                        "region": None, "bdem": None, "separation_m": None})
     for plan in plans:
         key = os.path.splitext(os.path.basename(plan["file"]))[0]
         shutil.copy2(plan["file"], os.path.join(root, "plans", key + ".json"))
@@ -211,11 +223,36 @@ def run_dir(root, key, mcs, sinr):
     return os.path.join(root, "raw", key, f"mcs_{mcs}", f"sinr_{sinr:g}")
 
 
+def set_ul_sinr(path, sinr):
+    """Rewrite one .conf in place with the uplink noise for a target SINR (as in bulk runs:
+    noise_power_dB = BULK_NOISE_AT_0DB_SINR - sinr in BLOCK_UE_SIDE). Used by manual runs."""
+    with open(path, encoding="utf-8") as f:
+        text = fill_block(f.read(), BLOCK_UE_SIDE, {BULK_NOISE_KEY: f"{BULK_NOISE_AT_0DB_SINR - sinr:.2f}"})
+    if text is None:
+        raise ValueError(f"'{BULK_NOISE_KEY}' not found in {BLOCK_UE_SIDE} of "
+                         f"{os.path.basename(path)}, so the uplink SINR cannot be set")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def write_raw_confs(out_dir, gnb_template, ue_template):
+    """Copy the templates unchanged into out_dir under the standard names. Returns (gnb, ue)."""
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for name, src in ((GNB_CONF, gnb_template), (UE_CONF, ue_template)):
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"template .conf not found: {src}")
+        paths.append(os.path.join(out_dir, name))
+        shutil.copy2(src, paths[-1])
+    return tuple(paths)
+
+
 def write_run_confs(root, key, mcs, sinr):
     """Write this run's gNB and UE .conf into its own folder, with the noise level for the target
     SINR set on the UPLINK only (BLOCK_UE_SIDE: UE transmits, gNB receives). The downlink entry
     keeps the template's noise and gets BULK_DL_GAIN_DB of signal gain (as ploss_dB) so the UE can
-    sync over the plan's terrain channel. Returns (gnb_path, ue_path).
+    sync over the plan's terrain channel; the raw-template run (no site plan) keeps the template's
+    downlink as it is, like a manual run with no plan. Returns (gnb_path, ue_path).
     The MCS is NOT written here: the gNB runs in --phy-test, where the GUI passes it on the command
     line (-m DL, -t UL) and the phy-test scheduler uses it as a fixed MCS for every transmission.
     Raises ValueError naming the missing key if a conf has no place for a value."""
@@ -231,11 +268,12 @@ def write_run_confs(root, key, mcs, sinr):
             raise ValueError(f"'{BULK_NOISE_KEY}' not found in {BLOCK_UE_SIDE} of {name}, "
                              f"so the uplink SINR cannot be set")
         text = filled
-        filled = fill_block(text, BLOCK_GNB_SIDE, {"ploss_dB": f"{BULK_DL_GAIN_DB:.2f}"})
-        if filled is None:
-            raise ValueError(f"'ploss_dB' not found in {BLOCK_GNB_SIDE} of {name}, "
-                             f"so the downlink gain cannot be set")
-        text = filled
+        if key != RAW_TEMPLATE_KEY:
+            filled = fill_block(text, BLOCK_GNB_SIDE, {"ploss_dB": f"{BULK_DL_GAIN_DB:.2f}"})
+            if filled is None:
+                raise ValueError(f"'ploss_dB' not found in {BLOCK_GNB_SIDE} of {name}, "
+                                 f"so the downlink gain cannot be set")
+            text = filled
         path = os.path.join(out, name)
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
