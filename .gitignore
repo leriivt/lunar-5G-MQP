@@ -6,4 +6,5 @@ __pycache__/
 files/exports/
 files/RFSim_Frontend/saved_runs/
 files/RFSim_Frontend/last_confs.json
+files/RFSim_Frontend/last_bulk_settings.json
 files/atlas_v2/**/*.bdem

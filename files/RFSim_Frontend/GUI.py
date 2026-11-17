@@ -37,6 +37,7 @@ DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb0.sa.band78.fr1.106PRB.prs.usrpx31
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
 # last gNB/UE .conf chosen in the GUI, restored on the next launch (per machine, not in git)
 LAST_CONFS_FILE = os.path.join(Path(__file__).parent, "last_confs.json")
+BULK_SETTINGS_FILE = os.path.join(Path(__file__).parent, "last_bulk_settings.json")  # bulk-run form, kept between sessions
 STATS_REFRESH_MS = 500      # how often refresh_stats() should run once implemented
 NR_MAC_STATS = os.path.join(OAI_BUILD_DIR, "nrMAC_stats.log")  
 NR_L1_STATS = os.path.join(OAI_BUILD_DIR, "nrL1_stats.log")
@@ -232,7 +233,45 @@ class MainWindow(QMainWindow):
         self._bulk_queue, self._bulk_i = [], 0
         self._bulk_saved_confs = None
         self.refresh_plans()
+        self._restore_bulk_settings()
         return group
+
+    def _bulk_setting_widgets(self):
+        """name -> widget for every bulk-run setting kept between sessions (plan ticks are not kept)."""
+        return {"mcs": self.mcs_edit, "sinr_min": self.sinr_min, "sinr_max": self.sinr_max,
+                "sinr_step": self.sinr_step, "settle_s": self.settle_s,
+                "attach_s": self.attach_s, "measure_s": self.measure_s}
+
+    def _restore_bulk_settings(self):
+        """Fill the bulk-run form from the last session, then save it whenever it changes."""
+        try:
+            with open(BULK_SETTINGS_FILE, encoding="utf-8") as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            saved = {}
+        for name, widget in self._bulk_setting_widgets().items():
+            value = saved.get(name) if isinstance(saved, dict) else None
+            try:
+                if isinstance(widget, QLineEdit):
+                    if isinstance(value, str):
+                        widget.setText(value)
+                elif value is not None:
+                    widget.setValue(type(widget.value())(value))   # spin boxes clamp to their range
+            except (TypeError, ValueError):
+                pass
+            if isinstance(widget, QLineEdit):
+                widget.editingFinished.connect(self._save_bulk_settings)
+            else:
+                widget.valueChanged.connect(self._save_bulk_settings)
+
+    def _save_bulk_settings(self, *_):
+        values = {name: (w.text() if isinstance(w, QLineEdit) else w.value())
+                  for name, w in self._bulk_setting_widgets().items()}
+        try:
+            with open(BULK_SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(values, f, indent=2)
+        except OSError:
+            pass
 
     def open_planner(self):
         """Start the site planner as its own program. Plans it saves land in PLANS_DIR."""
@@ -762,6 +801,7 @@ class MainWindow(QMainWindow):
 
         event.ignore()
         self._closing = True
+        self._save_bulk_settings()
         self._bulk_running = False
         if self.timer is not None:
             self.timer.stop()
