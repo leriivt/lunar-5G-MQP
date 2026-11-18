@@ -41,8 +41,10 @@ OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
 CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF", "RF_SIMULATION")
 DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb1.sa.band78.fr1.106PRB.prs.usrpx310.conf")
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
-# gNB conf loaded when switching to PHY test mode (real USRP X310)
-PHY_GNB_CONF = os.path.join(Path(__file__).parent.parent, "Templates", "gnb1.sa.band78.fr1.106PRB.prs.usrpx310.conf")
+# gNB confs loaded by the mode button: PHY test (real USRP X310) and RFSim (BICTR terrain channel)
+TEMPLATES_DIR = os.path.join(Path(__file__).parent.parent, "Templates")
+PHY_GNB_CONF = os.path.join(TEMPLATES_DIR, "gnb1.sa.band78.fr1.106PRB.prs.usrpx310.conf")
+RFSIM_GNB_CONF = os.path.join(TEMPLATES_DIR, "gnb.sa.band78.fr1.106PRB.prs.usrpx310.bictr.conf")
 # last gNB/UE .conf chosen in the GUI, restored on the next launch (per machine, not in git)
 LAST_CONFS_FILE = os.path.join(Path(__file__).parent, "last_confs.json")
 BULK_SETTINGS_FILE = os.path.join(Path(__file__).parent, "last_bulk_settings.json")  # bulk-run form, kept between sessions
@@ -87,7 +89,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("RFSim Frontend")
         self.resize(1000, 820)
         self.sim_mode = True  # default simulation mode: true = RFSim, False = PHY test mode
-        self._rfsim_gnb_conf = None  # RFSim gNB conf to restore when leaving PHY test mode
         self._build_widgets()
 
         #-----gnb/ue processes----
@@ -636,13 +637,8 @@ class MainWindow(QMainWindow):
         #----------------
         self.sim_mode = not self.sim_mode
         self.mode_toggle.setText(f"Switch to {'PHY test' if self.sim_mode else 'RFSim'} mode")
-        # PHY test needs a USRP gNB conf; remember the RFSim one so switching back restores it.
-        # The UE conf box is left alone: the PHY UE script takes no conf.
-        if self.sim_mode:
-            self.gnb_conf.setText(self._rfsim_gnb_conf)
-        else:
-            self._rfsim_gnb_conf = self.gnb_conf.text()
-            self.gnb_conf.setText(PHY_GNB_CONF)
+        # Load each mode's gNB conf. The UE conf box is left alone: the PHY UE script takes no conf.
+        self.gnb_conf.setText(RFSIM_GNB_CONF if self.sim_mode else PHY_GNB_CONF)
 
     def flush_log_files(self):
         """Flush the gnb/ue log files."""
