@@ -37,6 +37,14 @@ def format_duration(seconds):
     return f"{h} h {m:02d} min" if h else (f"{m} min {s:02d} s" if m else f"{s} s")
 
 
+class _NoWheelSpinBox(QDoubleSpinBox):
+    """Centre SINR box that ignores the mouse wheel, so scrolling moves the table instead of
+    changing a value under the pointer."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class McsCenterDialog(QDialog):
     """selected: {mcs: centre} now in the bulk box (ticked); remembered: {mcs: centre} for every
     MCS from earlier edits; span/step: the box's +- range and step; n_plans: site plans ticked
@@ -86,7 +94,7 @@ class McsCenterDialog(QDialog):
             label = QLabel(str(mcs))
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setCellWidget(mcs, 1, label)
-            center = QDoubleSpinBox()
+            center = _NoWheelSpinBox()
             center.setRange(-50.0, 100.0)
             center.setDecimals(1)
             center.setSingleStep(0.5)
@@ -125,11 +133,8 @@ class McsCenterDialog(QDialog):
         n_mcs = sum(c.isChecked() for c in self.checks)
         per_mcs = len(centered_sinr_points(0.0, self._span, self._step))
         runs = self._n_plans * n_mcs * per_mcs
-        plans = f" x {self._n_plans} plans" if self._n_plans > 1 else ""
-        self.summary.setText(
-            f"{n_mcs} MCS x {per_mcs} SINR points (±{self._span:g} dB, step {self._step:g} dB)"
-            f"{plans} = {runs} runs, about {format_duration(runs * (self._per_run_s + RUN_OVERHEAD_S))} "
-            f"(without TA-drift retries)")
+        self.summary.setText(f"Runs: {runs}    Estimated time: "
+                             f"{format_duration(runs * (self._per_run_s + RUN_OVERHEAD_S))}")
 
     def selected(self):
         """{mcs: centre} of the ticked rows."""
