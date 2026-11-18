@@ -11,5 +11,4 @@ echo
 sudo ./nr-softmodem -O "$CONF" \
   --rfsim --phy-test --noS1 --parallel-config PARALLEL_SINGLE_THREAD \
   --gNBs.[0].min_rxtxtime 6 -m "$DL_MCS" -t "$UL_MCS"
-  --gNBs.[0].min_rxtxtime 6 -m "$DL_MCS" -t "$UL_MCS"
 echo; echo "----- process exited (code $?) -----"; read -rp "Press Enter to close this window..." _
