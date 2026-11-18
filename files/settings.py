@@ -17,11 +17,13 @@ POLE_DEM = os.path.join(ATLAS_DIR, "pole_dem_160m.tif")
 REGION_DIR = os.path.join(ATLAS_DIR, "regions")                          # <Region>__dem.tif
 CANDIDATES_CSV = os.path.join(APP_DIR, "data", "atlas_base", "candidates_freeze.csv")
 SITES_CSV = os.path.join(APP_DIR, "sites.csv")                           # id,name,lat_deg,lon_deg
-TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # your .bdem files
-POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific .bdem
+TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # legacy: .bdem files now sit next to
+                                                                         # their region TIFFs (find_bdem)
+POLE_BDEM = "lunar_south_pole.bdem"      # legacy, unused: covers lat -60..-30, not the pole
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
 TEMPLATE_DIR = os.path.join(APP_DIR, "Templates")                       # OAI gNB/UE .conf templates filled on export
 GNB_DEFAULTS_CSV = os.path.join(APP_DIR, "gnb_defaults.csv")             # region,lon,lat,height_m
+PLANS_DIR = os.path.join(APP_DIR, "plans")                               # saved gNB+UE site plans (JSON) for bulk runs
 
 # optimal_gNB.py lives at the repo root, alongside its coverage/index CSVs
 OPTIMAL_GNB_CANDIDATES_CSV = os.path.join(ROOT_DIR, "candidates_coverage.csv")
@@ -69,6 +71,33 @@ GNB_CONF = "gnb.sa.band78.fr1.106PRB.usrpb210.bictr.conf"
 UE_CONF = "ue.bictr.conf"
 BLOCK_GNB_SIDE = "rfsimu_channel_enB0"   # TX = gNB, RX = UE
 BLOCK_UE_SIDE = "rfsimu_channel_ue0"     # TX = UE,  RX = gNB (swapped)
+
+# ----------------------------------------------------------------------------
+# Bulk data collection: how a run's MCS and SINR are written into the .conf files
+# ----------------------------------------------------------------------------
+# The run's MCS is not written to the conf: the gNB runs in --phy-test and gets it as -m (DL) / -t (UL)
+# on the command line (RFSim_Frontend/.sh/gnb-bictr-gui.sh), which fixes the MCS for every transmission.
+BULK_NOISE_KEY = "noise_power_dB"        # key inside the uplink rfsimu_channel_* entry (BLOCK_UE_SIDE); bulk runs
+                                         # sweep the UPLINK SINR only, the downlink keeps the template's noise
+BULK_NOISE_AT_0DB_SINR = 0           # CALIBRATE: noise_power_dB that gives ~0 dB SINR on your link.
+                                         # A run's noise is BULK_NOISE_AT_0DB_SINR - target SINR. The measured
+                                         # UL SNR is logged next to the target, so you can check the mapping.
+BULK_DL_GAIN_DB = 18.0                   # downlink only (BLOCK_GNB_SIDE): written as ploss_dB, which rfsim applies as a
+                                         # signal GAIN of 10^(ploss_dB/20) (noise is added separately). bictr's terrain
+                                         # FIR leaves the DL signal weak, so the UE's SSS metric falls under OAI's fixed
+                                         # floor (SSS_METRIC_FLOOR_NR = 30000) and it never syncs; Haworth with the DEM
+                                         # gave ~7000. The metric scales with amplitude, so >12.6 dB is needed; 18 dB
+                                         # leaves margin for the random fading. The UL (what bulk runs sweep) is untouched.
+# Each bulk run gets a "link" flag (plans.classify_link); only "ok" runs are plotted.
+LINK_MAX_ABS_TA = 16                     # |TA total| (UE log, units of ~0.26 us) above which the UE's uplink timing
+                                         # has drifted ("ta_drift"); rfsim has no delay, so the right TA is 0
+LINK_MIN_RSRP_DB = -80                   # gNB's RSRP for the UE below which it no longer hears it ("ta_drift" too:
+                                         # healthy runs read about -44, runaway-TA runs -100 or lower)
+BULK_TA_RETRIES = 3                      # a bulk point flagged "ta_drift" is run again up to this many times
+                                         # (each attempt's row stays in the CSV with its flag; only "ok" rows plot)
+BULK_SETTLE_S = 15                       # seconds after starting the gNB before the UE is started
+BULK_ATTACH_S = 20                       # seconds after starting the UE before measuring
+BULK_MEASURE_S = 30                      # seconds of live-stats sampling per run
 
 # ----------------------------------------------------------------------------
 # LOOK AND FEEL: change colours and font size here (all UI colours live in this block)

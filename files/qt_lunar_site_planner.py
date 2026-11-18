@@ -28,13 +28,14 @@ from PyQt6.QtCore import QEvent, QPointF, QRectF, Qt
 from PyQt6.QtGui import (QColor, QFont, QFontMetrics, QFontMetricsF, QImage, QPainter, QPalette, QPen,
                          QPolygonF)
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame,
-                             QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
+                             QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
                              QVBoxLayout, QWidget)
 
 from geo_math import *
 from raster import *
 from catalog import *
 from export import *
+from plans import *
 from settings import *
 
 # optimal_gNB.py lives at the repo root, alongside its coverage/index CSVs
@@ -338,6 +339,7 @@ class PlannerApp(QWidget):
         self.sep_var = self._bold_label("Separation: -")
         lay.addWidget(self.sep_var)
         lay.addWidget(self._button("Export gNB + UE configs...", self.export))
+        lay.addWidget(self._button("Save site plan for bulk run...", self.save_site_plan))
         lay.addWidget(self._button("Clear markers", self.clear_points))
 
         self.status = QLabel(objectName="muted")
@@ -1229,6 +1231,36 @@ class PlannerApp(QWidget):
         run_dir = make_run_folder(out_dir, self.region.label)
         export_configs(run_dir, TEMPLATE_DIR, g, u, heights["gNB"], heights["UE"], bdem)
         self._set_status(f"Exported to:\n{run_dir}")
+
+    # ---- site plans for bulk data collection ---------------------------------
+    def save_site_plan(self):
+        """Save the current gNB + UE placement as a plan the RFSim GUI can sweep MCS/SINR over."""
+        if self.mode != "region" or not all(self.points.values()):
+            QMessageBox.warning(self, "Not ready", "Open a region and place both the gNB and the UE.")
+            return
+        try:
+            heights = {w: float(v.text()) for w, v in self.height_vars.items()}
+        except ValueError:
+            QMessageBox.warning(self, "Invalid height", "Antenna heights must be numbers.")
+            return
+        g, u = self.lonlat("gNB"), self.lonlat("UE")
+        if g == u:
+            QMessageBox.warning(self, "Same point", "gNB and UE are at the same position.")
+            return
+        bdem = find_bdem(self.region.stem)
+        if not os.path.exists(bdem) and QMessageBox.question(
+                self, "Missing .bdem",
+                f"{bdem} was not found.\nThe simulator would fall back to flat terrain. Save anyway?"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        sep = distance_m(g, u)
+        name, ok = QInputDialog.getText(self, "Save site plan", "Plan name:",
+                                        text=f"{self.region.label} {sep:.0f} m")
+        if not ok or not name.strip():
+            return
+        path = save_plan(name.strip(), self.region.stem, self.region.label, g, u,
+                         heights["gNB"], heights["UE"], bdem, sep)
+        self._set_status(f"Saved site plan:\n{path}")
 
 
 def main():

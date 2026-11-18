@@ -1,0 +1,18 @@
+{
+  "name": "Haworth 7285 m",
+  "region": "Haworth",
+  "region_label": "Haworth",
+  "gnb": {
+    "lon": -29.2519,
+    "lat": -86.6387,
+    "height_m": 4.0
+  },
+  "ue": {
+    "lon": -25.405503730384083,
+    "lat": -86.72953176308923,
+    "height_m": 1.5
+  },
+  "bdem": "C:\\Users\\btomf\\Desktop\\Projects\\Academics\\MQP Resources\\github\\lunar-5G-MQP\\files\\terrain\\08_Haworth.bdem",
+  "separation_m": 7285.1,
+  "saved": "2026-11-15T12:05:18"
+}

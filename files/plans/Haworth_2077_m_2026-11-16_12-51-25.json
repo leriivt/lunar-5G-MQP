@@ -1,0 +1,18 @@
+{
+  "name": "Haworth 2077 m",
+  "region": "Haworth",
+  "region_label": "Haworth",
+  "gnb": {
+    "lon": -29.2519,
+    "lat": -86.6387,
+    "height_m": 4.0
+  },
+  "ue": {
+    "lon": -28.871800384727628,
+    "lat": -86.70355152985047,
+    "height_m": 1.5
+  },
+  "bdem": "/home/lunar5g/Desktop/lunar-5G-MQP/files/atlas_v2/bundle/context/regions/Haworth__dem.bdem",
+  "separation_m": 2077.3,
+  "saved": "2026-11-16T12:51:25"
+}

@@ -38,8 +38,9 @@ POLE_DEM = os.path.join(ATLAS_DIR, "pole_dem_160m.tif")
 REGION_DIR = os.path.join(ATLAS_DIR, "regions")                          # <Region>__dem.tif
 CANDIDATES_CSV = os.path.join(APP_DIR, "data", "atlas_base", "candidates_freeze.csv")
 SITES_CSV = os.path.join(APP_DIR, "sites.csv")                           # id,name,lat_deg,lon_deg
-TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # your .bdem files
-POLE_BDEM = "lunar_south_pole.bdem"      # used when there is no region-specific .bdem
+TERRAIN_DIR = os.path.join(APP_DIR, "terrain")                           # legacy: .bdem files now sit next to
+                                                                         # their region TIFFs (find_bdem)
+POLE_BDEM = "lunar_south_pole.bdem"      # legacy, unused: covers lat -60..-30, not the pole
 EXPORT_DIR = os.path.join(APP_DIR, "exports")
 # Topographic overlays: transparent *_topo_hq.png files, searched in these folders in order
 TOPO_POLE_FOLDERS = [ATLAS_DIR, BUNDLE_DIR]
@@ -374,16 +375,14 @@ def load_catalog(path=SITES_CSV):
 
 
 def find_bdem(stem):
-    """Region-specific .bdem in terrain/ if present, else the pole-wide file, else the
-    expected region path (reported as missing by the app)."""
-    if os.path.isdir(TERRAIN_DIR):
-        for fname in sorted(os.listdir(TERRAIN_DIR)):
-            if fname.lower().endswith(".bdem") and stem.lower() in fname.lower():
-                return os.path.abspath(os.path.join(TERRAIN_DIR, fname))
-        pole = os.path.join(TERRAIN_DIR, POLE_BDEM)
-        if os.path.exists(pole):
-            return os.path.abspath(pole)
-    return os.path.abspath(os.path.join(TERRAIN_DIR, f"{stem}.bdem"))
+    """The region's bictr terrain file: <Region>__dem.bdem next to its <Region>__dem.tif
+    (generated from the TIFF by make_region_bdems.py). If it hasn't been generated yet, the
+    expected path is returned and the app reports it as missing."""
+    for folder in (REGION_DIR, os.path.join(BUNDLE_DIR, "regions")):
+        path = os.path.join(folder, f"{stem}__dem.bdem")
+        if os.path.exists(path):
+            return os.path.abspath(path)
+    return os.path.abspath(os.path.join(REGION_DIR, f"{stem}__dem.bdem"))
 
 
 def load_candidates(path=CANDIDATES_CSV):
