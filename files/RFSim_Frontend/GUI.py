@@ -40,6 +40,8 @@ OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
 CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF", "RF_SIMULATION")
 DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
+# gNB conf loaded when switching to PHY test mode (real USRP X310)
+PHY_GNB_CONF = os.path.join(Path(__file__).parent.parent, "Templates", "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
 # last gNB/UE .conf chosen in the GUI, restored on the next launch (per machine, not in git)
 LAST_CONFS_FILE = os.path.join(Path(__file__).parent, "last_confs.json")
 BULK_SETTINGS_FILE = os.path.join(Path(__file__).parent, "last_bulk_settings.json")  # bulk-run form, kept between sessions
@@ -84,6 +86,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("RFSim Frontend")
         self.resize(1000, 820)
         self.sim_mode = True  # default simulation mode: true = RFSim, False = PHY test mode
+        self._rfsim_gnb_conf = None  # RFSim gNB conf to restore when leaving PHY test mode
         self._build_widgets()
 
         #-----gnb/ue processes----
@@ -112,7 +115,7 @@ class MainWindow(QMainWindow):
         main_btns = QGroupBox("Other stuff")
         btns = QFormLayout(main_btns)
 
-        self.mode_toggle = QPushButton(f"Switch to {'RFSim' if self.sim_mode else 'PHY test'} mode")
+        self.mode_toggle = QPushButton(f"Switch to {'PHY test' if self.sim_mode else 'RFSim'} mode")
         self.mode_toggle.clicked.connect(self.toggle_mode)
         btns.addRow(self.mode_toggle)
 
@@ -589,8 +592,21 @@ class MainWindow(QMainWindow):
         self.timer.start()
 
     def toggle_mode(self):
+        #---------------- Make sure no gNB or UE is running before switching modes
+        running = any(p is not None and p.state() != QProcess.ProcessState.NotRunning
+                      for p in (self.p_gnb, self.p_ue))
+        if running or self._bulk_running:
+            return
+        #----------------
         self.sim_mode = not self.sim_mode
-        self.mode_toggle.setText(f"Switch to {'RFSim' if self.sim_mode else 'PHY test'} mode")
+        self.mode_toggle.setText(f"Switch to {'PHY test' if self.sim_mode else 'RFSim'} mode")
+        # PHY test needs a USRP gNB conf; remember the RFSim one so switching back restores it.
+        # The UE conf box is left alone: the PHY UE script takes no conf.
+        if self.sim_mode:
+            self.gnb_conf.setText(self._rfsim_gnb_conf)
+        else:
+            self._rfsim_gnb_conf = self.gnb_conf.text()
+            self.gnb_conf.setText(PHY_GNB_CONF)
 
     def flush_log_files(self):
         """Flush the gnb/ue log files."""
@@ -694,7 +710,8 @@ class MainWindow(QMainWindow):
             if confs:
                 conf = confs[0]
             mcs = self.manual_mcs.value()
-        args = [GNB_MAKE, conf]
+        script = GNB_MAKE if self.sim_mode else GNB_MAKE_PHY
+        args = [script, conf]
         if mcs is not None:
             args += [str(mcs), str(mcs)]
         process.start("bash", args)
@@ -733,7 +750,10 @@ class MainWindow(QMainWindow):
         )
         
         self._reset_attach()
-        process.start("bash", [UE_MAKE, conf])
+        if self.sim_mode:
+            process.start("bash", [UE_MAKE, conf])
+        else:
+            process.start("bash", [UE_MAKE_PHY])   # real USRP: no .conf (see below)
         self.ue_status.setText("UE: Starting")
 
     def _manual_sinr_value(self):
