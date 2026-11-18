@@ -118,6 +118,44 @@ def sinr_points(lo, hi, step):
     return [round(lo + i * step, 6) for i in range(n + 1)]
 
 
+_CENTER_RE = re.compile(r"^\s*(-?\d+(?:\.\d*)?)\s*(?:dB)?\s*$", re.IGNORECASE)
+
+
+def parse_mcs_centers(text):
+    """MCS -> centre SINR pairs: '9: 5; 12: 8.5; 20-21: 14' -> {9: 5.0, 12: 8.5, 20: 14.0, 21: 14.0}.
+    Entries are separated by ';' or new lines; each is '<MCS>: <centre SINR dB>', where the MCS
+    part takes the same forms as parse_mcs (one index, a list or a range). An MCS listed twice
+    keeps its last centre. Raises ValueError."""
+    out = {}
+    for entry in re.split(r"[;\n]", text or ""):
+        if not entry.strip():
+            continue
+        mcs_text, sep, center_text = entry.partition(":")
+        m = _CENTER_RE.match(center_text) if sep else None
+        if not m:
+            raise ValueError(f"MCS/centre SINR '{entry.strip()}': expected '<MCS>: <centre SINR dB>'")
+        try:
+            mcs_list = parse_mcs(mcs_text)
+        except ValueError as err:
+            raise ValueError(f"MCS/centre SINR '{entry.strip()}': {err}") from None
+        for mcs in mcs_list:
+            out[mcs] = float(m.group(1))
+    if not out:
+        raise ValueError("enter at least one MCS: centre SINR pair, e.g. 9: 5")
+    return dict(sorted(out.items()))
+
+
+def centered_sinr_points(center, span, step):
+    """Target SINRs from center - span to center + span (dB) in steps of step, always including
+    the centre itself (if span is not a multiple of step, the ends stop short of +-span)."""
+    if span < 0:
+        raise ValueError("SINR +- range cannot be negative")
+    if step <= 0:
+        raise ValueError("SINR step must be greater than zero")
+    n = int(span / step + 1e-9)
+    return [round(center + i * step, 6) for i in range(-n, n + 1)]
+
+
 # ----------------------------------------------------------------------------
 # Bulk run folder
 # ----------------------------------------------------------------------------
@@ -168,7 +206,11 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
 
     gnb_template / ue_template: the .conf files to build each run from (the GUI passes the ones
     selected for manual runs, so bulk runs use the same cell config); None = the files in
-    template_dir. Returns the folder path."""
+    template_dir. sinr_list: one list of target SINRs for every MCS, or {mcs: [SINRs]} to give
+    each MCS its own range (an MCS missing from the dict is not run). Returns the folder path."""
+    if not isinstance(sinr_list, dict):
+        sinr_list = {m: list(sinr_list) for m in mcs_list}
+    sinr_by_mcs = {m: list(sinr_list.get(m, [])) for m in mcs_list}
     templates = {GNB_CONF: gnb_template or os.path.join(template_dir, GNB_CONF),
                  UE_CONF: ue_template or os.path.join(template_dir, UE_CONF)}
     for path in templates.values():
@@ -204,9 +246,10 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
         f.write(",".join(DATA_COLUMNS) + "\n")
     manifest = {
         "created": datetime.now().isoformat(timespec="seconds"),
-        "plans": entries, "mcs": mcs_list, "sinr_db": sinr_list,
+        "plans": entries, "mcs": mcs_list,
+        "sinr_db_by_mcs": {str(m): pts for m, pts in sinr_by_mcs.items()},
         "templates": {"gnb": templates[GNB_CONF], "ue": templates[UE_CONF]},
-        "runs": len(entries) * len(mcs_list) * len(sinr_list),
+        "runs": len(entries) * sum(len(pts) for pts in sinr_by_mcs.values()),
     }
     with open(os.path.join(root, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -217,9 +260,11 @@ def make_bulk_run(parent, plans, mcs_list, sinr_list, template_dir=TEMPLATE_DIR,
 # Sequential runner helpers (no Qt: the GUI drives these one run at a time)
 # ----------------------------------------------------------------------------
 def build_queue(manifest):
-    """[(plan key, mcs, sinr_db), ...] in run order: plan, then MCS, then SINR."""
+    """[(plan key, mcs, sinr_db), ...] in run order: plan, then MCS, then SINR. Each MCS uses
+    its own SINR list (sinr_db_by_mcs); older manifests have one "sinr_db" list for all."""
+    by_mcs = manifest.get("sinr_db_by_mcs") or {}
     return [(e["key"], m, s) for e in manifest["plans"] for m in manifest["mcs"]
-            for s in manifest["sinr_db"]]
+            for s in by_mcs.get(str(m), manifest.get("sinr_db", []))]
 
 
 def run_dir(root, key, mcs, sinr):

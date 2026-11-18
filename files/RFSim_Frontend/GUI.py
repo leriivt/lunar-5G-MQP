@@ -23,8 +23,8 @@ from PyQt6.QtWidgets import (QApplication, QDoubleSpinBox, QFormLayout, QGridLay
 
 # GUI.py sits in a subfolder; plans.py, settings.py, export.py and the planner are one level up
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_run, parse_mcs,
-                   RAW_TEMPLATE_KEY, classify_link, run_dir, set_ul_sinr, sinr_points, write_plan_confs, write_raw_confs,
+from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_run,
+                   RAW_TEMPLATE_KEY, centered_sinr_points, classify_link, parse_mcs_centers, run_dir, set_ul_sinr, write_plan_confs, write_raw_confs,
                    write_run_confs)
 from bulk_plot import load_curves, plot_bulk
 from live_graph import BlerSnrGraph, LiveGraph
@@ -243,26 +243,30 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(group)
 
         form = QFormLayout()
-        self.mcs_edit = QLineEdit("0-27")
-        self.mcs_edit.setToolTip("MCS indices, e.g. 0-9, 12, 15-20  (valid range 0-28)")
-        form.addRow("MCS to run", self.mcs_edit)
+        self.mcs_centers = QLineEdit("9: 5")
+        self.mcs_centers.setPlaceholderText("e.g.  5: 2;  9: 5;  12-13: 8.5")
+        self.mcs_centers.setToolTip(
+            "Each MCS to run and the target SINR its sweep is centred on.\n"
+            "Entries separated by ';':  <MCS>: <centre SINR dB>   (MCS 0-28)\n"
+            "The MCS part can be a list or range sharing one centre (12-13: 8.5).\n"
+            "Each MCS sweeps centre - range ... centre + range in steps of 'step'.")
+        form.addRow("MCS : centre SINR", self.mcs_centers)
 
         sinr_row = QHBoxLayout()
-        self.sinr_min, self.sinr_max, self.sinr_step = (QDoubleSpinBox() for _ in range(3))
-        for box, value in ((self.sinr_min, -5.0), (self.sinr_max, 30.0)):
-            box.setRange(-50.0, 100.0)
-            box.setDecimals(1)
-            box.setValue(value)
-            box.setSuffix(" dB")
+        self.sinr_span, self.sinr_step = QDoubleSpinBox(), QDoubleSpinBox()
+        self.sinr_span.setRange(0.0, 50.0)
+        self.sinr_span.setValue(3.0)
+        self.sinr_span.setPrefix("\u00b1 ")
         self.sinr_step.setRange(0.1, 50.0)
-        self.sinr_step.setDecimals(1)
         self.sinr_step.setValue(1.0)
-        self.sinr_step.setSuffix(" dB")
-        for label, box in (("from", self.sinr_min), ("to", self.sinr_max), ("step", self.sinr_step)):
+        for box in (self.sinr_span, self.sinr_step):
+            box.setDecimals(1)
+            box.setSuffix(" dB")
+        for label, box in (("range", self.sinr_span), ("step", self.sinr_step)):
             sinr_row.addWidget(QLabel(label))
             sinr_row.addWidget(box)
         sinr_row.addStretch()
-        form.addRow("SINR range", sinr_row)
+        form.addRow("SINR around centre", sinr_row)
 
         timing = QHBoxLayout()
         self.settle_s, self.attach_s, self.measure_s = (QSpinBox() for _ in range(3))
@@ -300,8 +304,8 @@ class MainWindow(QMainWindow):
 
     def _bulk_setting_widgets(self):
         """name -> widget for every run setting kept between sessions (plan ticks are not kept)."""
-        return {"manual_mcs": self.manual_mcs, "manual_sinr": self.manual_sinr, "mcs": self.mcs_edit, "sinr_min": self.sinr_min, "sinr_max": self.sinr_max,
-                "sinr_step": self.sinr_step, "settle_s": self.settle_s,
+        return {"manual_mcs": self.manual_mcs, "manual_sinr": self.manual_sinr, "mcs_centers": self.mcs_centers,
+                "sinr_span": self.sinr_span, "sinr_step": self.sinr_step, "settle_s": self.settle_s,
                 "attach_s": self.attach_s, "measure_s": self.measure_s}
 
     def _restore_bulk_settings(self):
@@ -381,12 +385,15 @@ class MainWindow(QMainWindow):
         """Validate the inputs, then create the timestamped folder for raw runs and data."""
         plans = self.checked_plans()      # none ticked: run the raw templates (plans.RAW_TEMPLATE_KEY)
         try:
-            mcs = parse_mcs(self.mcs_edit.text())
-            sinr = sinr_points(self.sinr_min.value(), self.sinr_max.value(), self.sinr_step.value())
+            centers = parse_mcs_centers(self.mcs_centers.text())
+            sinr = {m: centered_sinr_points(c, self.sinr_span.value(), self.sinr_step.value())
+                    for m, c in centers.items()}          # each MCS's own target SINR list
         except ValueError as err:
             QMessageBox.warning(self, "Bulk run", str(err))
             return False
-        runs = max(len(plans), 1) * len(mcs) * len(sinr)
+        mcs = list(centers)
+        n_points = sum(len(pts) for pts in sinr.values())
+        runs = max(len(plans), 1) * n_points
         parent = SAVE_DIR          # the "Run output" save directory; the bulk folder is created inside it
         try:
             os.makedirs(parent, exist_ok=True)
@@ -399,8 +406,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Bulk run", f"Could not create the folder:\n{err}")
             return False
         what = f"{len(plans)} plan(s)" if plans else "raw template (no site plan)"
-        self.bulk_status.setText(f"Created {self.bulk_dir}\n{what} x {len(mcs)} MCS x "
-                                 f"{len(sinr)} SINR points = {runs} runs")
+        per_mcs = len(next(iter(sinr.values())))
+        self.bulk_status.setText(f"Created {self.bulk_dir}\n{what} x {len(mcs)} MCS x {per_mcs} SINR "
+                                 f"points (\u00b1{self.sinr_span.value():g} dB around each centre) = {runs} runs")
         return True
 
     # ---- sequential bulk run -------------------------------------------------
