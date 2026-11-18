@@ -39,10 +39,10 @@ OAI_DIR = "/home/lunar5g/openairinterface5g"
 OAI_BUILD_DIR = os.path.join(OAI_DIR, "cmake_targets", "ran_build", "build")
 #CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF")
 CONF_DIR = os.path.join(OAI_DIR, "targets", "PROJECTS", "GENERIC-NR-5GC", "CONF", "RF_SIMULATION")
-DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
+DEFAULT_GNB_CONF = os.path.join(CONF_DIR, "gnb1.sa.band78.fr1.106PRB.prs.usrpx310.conf")
 DEFAULT_UE_CONF = os.path.join(CONF_DIR, "ue.bictr.conf")
 # gNB conf loaded when switching to PHY test mode (real USRP X310)
-PHY_GNB_CONF = os.path.join(Path(__file__).parent.parent, "Templates", "gnb0.sa.band78.fr1.106PRB.prs.usrpx310.conf")
+PHY_GNB_CONF = os.path.join(Path(__file__).parent.parent, "Templates", "gnb1.sa.band78.fr1.106PRB.prs.usrpx310.conf")
 # last gNB/UE .conf chosen in the GUI, restored on the next launch (per machine, not in git)
 LAST_CONFS_FILE = os.path.join(Path(__file__).parent, "last_confs.json")
 BULK_SETTINGS_FILE = os.path.join(Path(__file__).parent, "last_bulk_settings.json")  # bulk-run form, kept between sessions
