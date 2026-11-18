@@ -1074,26 +1074,26 @@ class MainWindow(QMainWindow):
         super().close()
 
   
-    # ---- save runs in file -------------------------------------------------------------
-    def save_run(self):
-        """Save the current run's configuration and stats to a text file, and save the log files in the same directory"""
-        print("Saving run...")
-        # #create special identifier
-        # os.makedirs(SAVE_DIR, exist_ok=True)
-        # file = os.path.join(SAVE_DIR, f"run_{time.strftime('%Y-%m-%d_%H-%M-%S')}.txt")
+    # # ---- save runs in file -------------------------------------------------------------
+    # def save_run(self):
+    #     """Save the current run's configuration and stats to a text file, and save the log files in the same directory"""
+    #     print("Saving run...")
+    #     # #create special identifier
+    #     # os.makedirs(SAVE_DIR, exist_ok=True)
+    #     # file = os.path.join(SAVE_DIR, f"run_{time.strftime('%Y-%m-%d_%H-%M-%S')}.txt")
 
-        with open(file, "w") as f:
-            f.write(f"Run saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"gNB config: {self._gnb_conf_path()}\n")
-            f.write(f"UE config: {self._ue_conf_path()}\n")
-            f.write(f"DL MCS: {self.dl_mcs}\n")
-            f.write(f"UL MCS: {self.ul_mcs}\n")
-            f.write(f"DL BLER: {self.dl_bler:.5f}\n")
-            f.write(f"UL BLER: {self.ul_bler:.5f}\n")
-            f.write(f"SNR: {self.snr:.5f} dB\n")
-            f.write(f"run time: {self._gnb_end_time - self._gnb_start_time:.2f} s\n") 
+    #     with open(file, "w") as f:
+    #         f.write(f"Run saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    #         f.write(f"gNB config: {self._gnb_conf_path()}\n")
+    #         f.write(f"UE config: {self._ue_conf_path()}\n")
+    #         f.write(f"DL MCS: {self.dl_mcs}\n")
+    #         f.write(f"UL MCS: {self.ul_mcs}\n")
+    #         f.write(f"DL BLER: {self.dl_bler:.5f}\n")
+    #         f.write(f"UL BLER: {self.ul_bler:.5f}\n")
+    #         f.write(f"SNR: {self.snr:.5f} dB\n")
+    #         f.write(f"run time: {self._gnb_end_time - self._gnb_start_time:.2f} s\n") 
 
-        #     f.write("Packets sent: \n") #fill in here
+    #     #     f.write("Packets sent: \n") #fill in here
         
         
 

@@ -60,8 +60,15 @@ def load_curves(csv_path, y_col="ul_bler"):
 
 
 def mcs_color(mcs):
-    """Low MCS = blue/purple, high MCS = red, spread over the 0..28 range."""
-    return QColor.fromHsv(int(260 - 260 * min(max(mcs, 0), 28) / 28), 210, 210)
+    """Rainbow over MCS 0..28: violet (low) -> blue -> green -> yellow -> red (high), fully
+    saturated. Odd MCS are drawn darker than even ones so neighbouring MCS, whose hues are
+    only ~10 deg apart, still stand out; yellows are darkened to stay readable on white."""
+    mcs = min(max(int(mcs), 0), 28)
+    hue = int(285 - 285 * mcs / 28)
+    value = 240 if mcs % 2 == 0 else 165
+    if 40 <= hue <= 80:
+        value -= 45
+    return QColor.fromHsv(hue, 255, value)
 
 
 def _nice_step(span):
