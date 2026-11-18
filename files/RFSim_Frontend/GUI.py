@@ -27,6 +27,7 @@ from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_r
                    RAW_TEMPLATE_KEY, centered_sinr_points, classify_link, parse_mcs_centers, run_dir, set_ul_sinr, write_plan_confs, write_raw_confs,
                    write_run_confs)
 from bulk_plot import load_curves, plot_bulk
+from mcs_dialog import McsCenterDialog, format_centers
 from live_graph import BlerSnrGraph, LiveGraph
 from settings import (APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, BULK_TA_RETRIES,
                       PLANS_DIR)
@@ -249,8 +250,13 @@ class MainWindow(QMainWindow):
             "Each MCS to run and the target SINR its sweep is centred on.\n"
             "Entries separated by ';':  <MCS>: <centre SINR dB>   (MCS 0-28)\n"
             "The MCS part can be a list or range sharing one centre (12-13: 8.5).\n"
-            "Each MCS sweeps centre - range ... centre + range in steps of 'step'.")
-        form.addRow("MCS : centre SINR", self.mcs_centers)
+            "Each MCS sweeps centre - range ... centre + range in steps of 'step'.\n"
+            "'Choose MCS...' picks them from a table and writes this field for you.")
+        centers_row = QHBoxLayout()
+        centers_row.addWidget(self.mcs_centers, 1)
+        centers_row.addWidget(self._button("Choose MCS...", self.choose_mcs))
+        form.addRow("MCS : centre SINR", centers_row)
+        self._mcs_table_centers = {}    # every MCS's centre from the table, ticked or not (saved)
 
         sinr_row = QHBoxLayout()
         self.sinr_span, self.sinr_step = QDoubleSpinBox(), QDoubleSpinBox()
@@ -315,6 +321,11 @@ class MainWindow(QMainWindow):
                 saved = json.load(f)
         except (OSError, ValueError):
             saved = {}
+        try:
+            self._mcs_table_centers = {int(m): float(c) for m, c in
+                                       (saved.get("mcs_table_centers") or {}).items()}
+        except (AttributeError, TypeError, ValueError):
+            self._mcs_table_centers = {}
         for name, widget in self._bulk_setting_widgets().items():
             value = saved.get(name) if isinstance(saved, dict) else None
             try:
@@ -333,11 +344,28 @@ class MainWindow(QMainWindow):
     def _save_bulk_settings(self, *_):
         values = {name: (w.text() if isinstance(w, QLineEdit) else w.value())
                   for name, w in self._bulk_setting_widgets().items()}
+        values["mcs_table_centers"] = {str(m): c for m, c in sorted(self._mcs_table_centers.items())}
         try:
             with open(BULK_SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(values, f, indent=2)
         except OSError:
             pass
+
+    def choose_mcs(self):
+        """Open the MCS table; on OK, write the ticked MCS and centres into the text field."""
+        try:
+            selected = parse_mcs_centers(self.mcs_centers.text())
+        except ValueError:
+            selected = {}                   # empty or unreadable field: start from nothing ticked
+        dialog = McsCenterDialog(self, selected, self._mcs_table_centers,
+                                 self.sinr_span.value(), self.sinr_step.value(),
+                                 len(self.checked_plans()),
+                                 self.settle_s.value() + self.attach_s.value() + self.measure_s.value())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._mcs_table_centers = dialog.centres_all()
+        self.mcs_centers.setText(format_centers(dialog.selected()))
+        self._save_bulk_settings()
 
     def open_planner(self):
         """Start the site planner as its own program. Plans it saves land in PLANS_DIR."""
