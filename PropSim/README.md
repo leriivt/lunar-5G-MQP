@@ -1,0 +1,1 @@
+The code within this directory deals with communication with the KeySight PropSim via SCPI
