@@ -97,7 +97,7 @@ BULK_TA_RETRIES = 3                      # a bulk point flagged "ta_drift" is ru
                                          # (each attempt's row stays in the CSV with its flag; only "ok" rows plot)
 BULK_SETTLE_S = 15                       # seconds after starting the gNB before the UE is started
 BULK_MEASURE_S = 30                      # seconds of live-stats sampling per run
-
+BULK_ATTACH_S = 20                       # seconds after starting the UE before measuring
 # ----------------------------------------------------------------------------
 # LOOK AND FEEL: change colours and font size here (all UI colours live in this block)
 # ----------------------------------------------------------------------------
