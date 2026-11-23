@@ -29,7 +29,7 @@ from plans import (append_row, build_queue, delete_plan, load_plans, make_bulk_r
 from bulk_plot import load_curves, plot_bulk
 from mcs_dialog import McsCenterDialog, format_centers
 from live_graph import BlerSnrGraph, LiveGraph
-from settings import (APP_DIR, BULK_ATTACH_S, BULK_MEASURE_S, BULK_SETTLE_S, BULK_TA_RETRIES,
+from settings import (APP_DIR, BULK_MEASURE_S, BULK_SETTLE_S, BULK_TA_RETRIES,
                       PLANS_DIR)
 
 # ----------------------------------------------------------------------------
@@ -279,9 +279,8 @@ class MainWindow(QMainWindow):
         form.addRow("SINR around centre", sinr_row)
 
         timing = QHBoxLayout()
-        self.settle_s, self.attach_s, self.measure_s = (QSpinBox() for _ in range(3))
+        self.settle_s, self.measure_s = (QSpinBox() for _ in range(2))
         for label, box, value in (("gNB settle", self.settle_s, BULK_SETTLE_S),
-                                  ("UE attach wait", self.attach_s, BULK_ATTACH_S),
                                   ("measure", self.measure_s, BULK_MEASURE_S)):
             box.setRange(1, 3600)
             box.setValue(value)
@@ -316,7 +315,7 @@ class MainWindow(QMainWindow):
         """name -> widget for every run setting kept between sessions (plan ticks are not kept)."""
         return {"manual_mcs": self.manual_mcs, "manual_sinr": self.manual_sinr, "mcs_centers": self.mcs_centers,
                 "sinr_span": self.sinr_span, "sinr_step": self.sinr_step, "settle_s": self.settle_s,
-                "attach_s": self.attach_s, "measure_s": self.measure_s}
+                "measure_s": self.measure_s}
 
     def _restore_bulk_settings(self):
         """Fill the bulk-run form from the last session, then save it whenever it changes."""
@@ -364,7 +363,7 @@ class MainWindow(QMainWindow):
         dialog = McsCenterDialog(self, selected, self._mcs_table_centers,
                                  self.sinr_span.value(), self.sinr_step.value(),
                                  len(self.checked_plans()),
-                                 self.settle_s.value() + self.attach_s.value() + self.measure_s.value())
+                                 self.settle_s.value() + self.measure_s.value())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self._mcs_table_centers = dialog.centres_all()
@@ -480,6 +479,9 @@ class MainWindow(QMainWindow):
     def _bulk_end(self, message, stop=False):
         self._bulk_running = False
         self._bulk_gen += 1
+        if self.timer is not None:
+            self.timer.stop()
+            self.timer = None
         if stop:
             self.stop_all()
         if self._bulk_saved_confs:
@@ -488,6 +490,7 @@ class MainWindow(QMainWindow):
         self.bulk_start_btn.setEnabled(True)
         self.bulk_abort_btn.setEnabled(False)
         self.bulk_status.setText(f"{message}. Data: {os.path.join(self.bulk_dir, 'data')}")
+        #stop sampling time
         self.show_bulk_plots(self.bulk_dir)
 
     def show_bulk_plots(self, root):
@@ -542,11 +545,22 @@ class MainWindow(QMainWindow):
     def _bulk_start_ue(self):
         self.start_ue()
         self.bulk_status.setText(self.bulk_status.text().replace("starting gNB", "UE attaching"))
-        self._later(self.attach_s.value() * 1000, self._bulk_measure_begin)
+        self._bulk_wait_for_attach()
+
+    def ue_attach(self):
+        """Return the wall-clock time at which the UE synchronized, or None if it has not attached."""
+        return self._ue_sync_time
+
+    def _bulk_wait_for_attach(self):
+        if self.ue_attach() is None:
+            self._later(100, self._bulk_wait_for_attach)
+            return
+        self._bulk_measure_begin()
 
     def _bulk_measure_begin(self):
         self.bulk_status.setText(self.bulk_status.text().replace("UE attaching", "measuring"))
         self._bulk_left = self.measure_s.value()
+        self._measure_start = time.time()
         self._restart_stats()      # BLER baseline = first MAC dump in the measure window
         self._bulk_sample()
 
@@ -607,7 +621,7 @@ class MainWindow(QMainWindow):
         self._bulk_wait_stopped(tries=20)
 
     def _bulk_wait_stopped(self, tries):
-        """Wait for stop_all.sh and both processes to exit, then wait 1 s before restarting."""
+        """Wait for stop_all.sh and both processes to exit, then wait 500ms before restarting."""
         busy = any(p is not None and p.state() != QProcess.ProcessState.NotRunning
                    for p in (self.p_gnb, self.p_ue))
         busy = busy or (self.stopper is not None and
@@ -943,8 +957,6 @@ class MainWindow(QMainWindow):
 
     def _restart_stats(self):
         """Start counting again from the next stats dump (the counters keep running in OAI)."""
-        self._measure_start = time.time()
-        self.graph.mark(self._measure_start - self._gnb_start_time, "measure")
         self._baseline = {}
         self._stats_valid = {"dl": False, "ul": False, "snr": False}
         self._reset_health()

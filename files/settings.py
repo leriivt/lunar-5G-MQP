@@ -96,7 +96,6 @@ LINK_MIN_RSRP_DB = -80                   # gNB's RSRP for the UE below which it 
 BULK_TA_RETRIES = 3                      # a bulk point flagged "ta_drift" is run again up to this many times
                                          # (each attempt's row stays in the CSV with its flag; only "ok" rows plot)
 BULK_SETTLE_S = 15                       # seconds after starting the gNB before the UE is started
-BULK_ATTACH_S = 20                       # seconds after starting the UE before measuring
 BULK_MEASURE_S = 30                      # seconds of live-stats sampling per run
 
 # ----------------------------------------------------------------------------
