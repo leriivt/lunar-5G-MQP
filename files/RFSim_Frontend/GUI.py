@@ -607,9 +607,11 @@ class MainWindow(QMainWindow):
         self._bulk_wait_stopped(tries=20)
 
     def _bulk_wait_stopped(self, tries):
-        """Wait (up to ~10 s) for both processes to exit, then a short pause for the ports."""
+        """Wait for stop_all.sh and both processes to exit, then wait 1 s before restarting."""
         busy = any(p is not None and p.state() != QProcess.ProcessState.NotRunning
                    for p in (self.p_gnb, self.p_ue))
+        busy = busy or (self.stopper is not None and
+                        self.stopper.state() != QProcess.ProcessState.NotRunning)
         if busy and tries > 0:
             self._later(500, lambda: self._bulk_wait_stopped(tries - 1))
             return
@@ -618,7 +620,7 @@ class MainWindow(QMainWindow):
         else:
             self._bulk_i += 1
             self._bulk_retry = 0
-        self._later(2000, self._bulk_next)
+        self._later(500, self._bulk_next)
 
     def start_timer(self):
         if self.timer is not None:
@@ -1068,30 +1070,6 @@ class MainWindow(QMainWindow):
     def _finish_shutdown(self):
         self._force_kill_managed_processes()
         super().close()
-
-  
-    # # ---- save runs in file -------------------------------------------------------------
-    # def save_run(self):
-    #     """Save the current run's configuration and stats to a text file, and save the log files in the same directory"""
-    #     print("Saving run...")
-    #     # #create special identifier
-    #     # os.makedirs(SAVE_DIR, exist_ok=True)
-    #     # file = os.path.join(SAVE_DIR, f"run_{time.strftime('%Y-%m-%d_%H-%M-%S')}.txt")
-
-    #     with open(file, "w") as f:
-    #         f.write(f"Run saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    #         f.write(f"gNB config: {self._gnb_conf_path()}\n")
-    #         f.write(f"UE config: {self._ue_conf_path()}\n")
-    #         f.write(f"DL MCS: {self.dl_mcs}\n")
-    #         f.write(f"UL MCS: {self.ul_mcs}\n")
-    #         f.write(f"DL BLER: {self.dl_bler:.5f}\n")
-    #         f.write(f"UL BLER: {self.ul_bler:.5f}\n")
-    #         f.write(f"SNR: {self.snr:.5f} dB\n")
-    #         f.write(f"run time: {self._gnb_end_time - self._gnb_start_time:.2f} s\n") 
-
-    #     #     f.write("Packets sent: \n") #fill in here
-        
-        
 
 
 
